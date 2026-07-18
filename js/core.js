@@ -324,7 +324,7 @@
       const d = Math.hypot(e.x - player.x, e.y - player.y);
       if (d < e.r + player.r) {
         player.hp -= e.contactDmg;
-        player.invuln = 0.8;
+        player.invuln = 1.3; // widened alongside the ENEMY_TYPES dmg tuning above
         MG.sfx.hurt();
         addParticles(player.x, player.y, "#ff5c5c", 10);
         if (player.hp <= 0) { player.hp = 0; gameOver(); }
@@ -366,10 +366,18 @@
   // ---------------------------------------------------------------------
   // Enemies
   // ---------------------------------------------------------------------
+  // Balance note: contact damage only ever ticks once per player.invuln
+  // window (see handleContactDamage below) regardless of how many enemies
+  // are touching the player, so a fully idle/stationary player's time-to-
+  // death is essentially travel-time-to-first-contact + maxHp / (dmg /
+  // invuln). The original dmg values (10/8/20) killed an idle player in
+  // ~16s, well under the intended "not within ~30s" floor — tuned down
+  // here; this barely affects a moving/kiting player, since they take
+  // contact hits far less often to begin with.
   const ENEMY_TYPES = {
-    normal: { hp: 20, speed: 70, r: 26, dmg: 10, xp: 1 },
-    flitzer: { hp: 10, speed: 130, r: 18, dmg: 8, xp: 1 },
-    brocken: { hp: 90, speed: 40, r: 44, dmg: 20, xp: 5, tint: true },
+    normal: { hp: 20, speed: 70, r: 26, dmg: 6, xp: 1 },
+    flitzer: { hp: 10, speed: 130, r: 18, dmg: 5, xp: 1 },
+    brocken: { hp: 90, speed: 40, r: 44, dmg: 13, xp: 5, tint: true },
   };
   const MAX_ENEMIES = 250;
   const enemies = [];
@@ -622,6 +630,7 @@
         gems.splice(i, 1);
         addXP(g.value);
         MG.sfx.pickup();
+        addParticles(g.x, g.y, g.value >= 5 ? "#ffd54a" : "#7ee0ff", 5);
       }
     }
   }
@@ -680,8 +689,19 @@
     });
     levelupOverlay.classList.remove("hidden");
   }
+  // Guards against a rapid double-click (or double keypress) silently
+  // applying two picks in one gesture: when multiple level-ups are queued,
+  // picking one re-renders a fresh card set at the same screen position, so
+  // a second click that lands microseconds later would otherwise land on
+  // (and apply) the new card underneath it. A short debounce blocks that
+  // without getting in the way of deliberate, separately-read picks.
+  let lastPickAt = -Infinity;
+  const PICK_DEBOUNCE_MS = 300;
   function pickCard(idx) {
     if (state !== "levelup") return;
+    const now = performance.now();
+    if (now - lastPickAt < PICK_DEBOUNCE_MS) return;
+    lastPickAt = now;
     const opt = currentLevelUpOptions[idx];
     if (!opt) return;
     opt.apply();
@@ -845,6 +865,11 @@
 
     updatePlayer(dt);
     handleContactDamage();
+    // Defensive net: contact damage is currently the only way HP drops, and
+    // it already calls gameOver() itself. This guard just makes sure the
+    // state machine can never get stuck "playing" at 0 HP if a future
+    // damage source (regen underflow, a new hazard, etc.) skips that path.
+    if (state === "playing" && player.hp <= 0) { player.hp = 0; gameOver(); return; }
 
     spawnTimer -= dt;
     if (spawnTimer <= 0 && enemies.length < MAX_ENEMIES) {

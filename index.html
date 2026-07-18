@@ -65,6 +65,13 @@
     position: absolute; top: 24px; right: 16px;
     font-size: 17px; font-weight: bold; color: #ff5c5c;
   }
+  /* Narrow / mobile-portrait screens: the fixed-width HP bar (16px..206px)
+     otherwise collides with the horizontally-centered timer. Give the timer
+     its own row underneath instead of fighting for the same strip. */
+  @media (max-width: 480px) {
+    #hpWrap, #hpLabel { width: 130px; }
+    #timer { top: 48px; font-size: 15px; }
+  }
   #weaponRow {
     position: absolute; bottom: 16px; left: 16px;
     display: flex; gap: 8px;
