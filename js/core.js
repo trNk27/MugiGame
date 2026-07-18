@@ -398,7 +398,12 @@
   }
   function spawnEnemy(type) {
     const t = ENEMY_TYPES[type];
-    const hpMul = 1 + 0.1 * (gameTime / 60);
+    // Ease-in: spawn at 70% HP, ramping to full over the first 90s so the
+    // opening minute stays gentle; the +10%/min growth applies throughout.
+    // 70% also puts early normals (14 HP) under the starter whip's 15 dmg,
+    // so the opening seconds one-shot cleanly instead of leaving slivers.
+    const earlyMul = Math.min(1, 0.7 + 0.3 * (gameTime / 90));
+    const hpMul = earlyMul * (1 + 0.1 * (gameTime / 60));
     const margin = 80;
     const halfW = W / 2 + margin, halfH = H / 2 + margin;
     const edge = Math.floor(Math.random() * 4);
