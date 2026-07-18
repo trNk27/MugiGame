@@ -406,6 +406,9 @@
       angle: Math.random() * Math.PI * 2,
       hitFlash: 0, knockX: 0, knockY: 0, dead: false,
       tint: !!t.tint,
+      // Slow-effect hook (used by e.g. Frostpeitsche): while gameTime <
+      // slowUntil, movement speed is multiplied by slowFactor.
+      slowUntil: 0, slowFactor: 1,
     });
   }
 
@@ -448,7 +451,8 @@
       if (e.dead) { enemies.splice(i, 1); continue; }
       const dx = player.x - e.x, dy = player.y - e.y;
       const d = Math.hypot(dx, dy) || 1;
-      let vx = (dx / d) * e.speed, vy = (dy / d) * e.speed;
+      const slowMul = gameTime < e.slowUntil ? e.slowFactor : 1;
+      let vx = (dx / d) * e.speed * slowMul, vy = (dy / d) * e.speed * slowMul;
       vx += e.knockX; vy += e.knockY;
       const decay = Math.max(0, 1 - dt * 6);
       e.knockX *= decay; e.knockY *= decay;
@@ -467,7 +471,9 @@
     ctx.rotate(e.angle);
     const d = e.r * 2;
     if (imgReady) {
-      if (e.tint) ctx.filter = "brightness(0.8) sepia(1) saturate(5) hue-rotate(-45deg)";
+      const slowed = gameTime < e.slowUntil;
+      if (slowed) ctx.filter = "brightness(1.05) sepia(1) saturate(4) hue-rotate(150deg)";
+      else if (e.tint) ctx.filter = "brightness(0.8) sepia(1) saturate(5) hue-rotate(-45deg)";
       ctx.drawImage(markusImg, -e.r, -e.r, d, d);
       ctx.filter = "none";
       if (e.hitFlash > 0) {
