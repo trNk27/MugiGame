@@ -295,7 +295,7 @@
   const player = {
     x: 0, y: 0, r: 22,
     hp: 100,
-    stats: { speed: 220, maxHp: 100, regen: 0, pickupRadius: 90 },
+    stats: { speed: 220, maxHp: 130, regen: 0, pickupRadius: 90 },
     facing: { x: 1, y: 0 },
     invuln: 0,
     bob: 0,
@@ -793,7 +793,7 @@
 
   function resetGame() {
     player.x = 0; player.y = 0;
-    player.stats.speed = 220; player.stats.maxHp = 100; player.stats.regen = 0; player.stats.pickupRadius = 90;
+    player.stats.speed = 220; player.stats.maxHp = 130; player.stats.regen = 0; player.stats.pickupRadius = 90;
     player.hp = player.stats.maxHp;
     player.invuln = 0; player.facing.x = 1; player.facing.y = 0; player.bob = 0;
     enemies.length = 0; gems.length = 0; particles.length = 0; damageNumbers.length = 0;
