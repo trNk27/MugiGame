@@ -72,12 +72,13 @@
     #hpWrap, #hpLabel { width: 130px; }
     #timer { top: 48px; font-size: 15px; }
   }
-  #weaponRow {
-    position: absolute; bottom: 16px; left: 16px;
-    display: flex; gap: 8px;
+  #slotBar {
+    position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 6px;
   }
+  #slotBar .slotGap { width: 14px; }
   #minimap {
-    position: absolute; bottom: 16px; right: 16px;
+    position: absolute; top: 52px; left: 16px;
     width: 148px; height: 148px;
     border-radius: 50%;
     border: 2px solid rgba(255,213,74,0.55);
@@ -85,7 +86,15 @@
     box-shadow: 0 4px 14px rgba(0,0,0,0.35);
   }
   @media (max-width: 480px) {
-    #minimap { width: 104px; height: 104px; bottom: 74px; }
+    /* Minimap sits top-left under the HP bar. The slot bar spans nearly
+       the full screen width when centered, so instead of squeezing it
+       between the timer and the minimap (not enough vertical room for
+       both), it goes below the minimap — still "under the timer" in the
+       sense of being in the same top HUD cluster, but vertically clear of
+       every other top-left/top-center element. */
+    #minimap { width: 104px; height: 104px; top: 74px; left: 12px; }
+    #slotBar { top: 184px; gap: 4px; }
+    #slotBar .slotGap { width: 8px; }
   }
   .weapon-icon {
     position: relative; width: 42px; height: 42px;
@@ -95,12 +104,22 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 21px;
   }
+  .weapon-icon.passive-slot { border-color: rgba(126,224,255,0.65); }
+  .weapon-icon.empty-slot {
+    border-style: dashed;
+    opacity: 0.35;
+    background: rgba(10,10,18,0.35);
+  }
   .weapon-icon .lvl {
     position: absolute; bottom: -5px; right: -5px;
     font-size: 10px; font-weight: bold; color: #1a0a0a;
     background: #ffd54a; border-radius: 8px;
     padding: 0 4px; line-height: 14px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.6);
+  }
+  @media (max-width: 480px) {
+    .weapon-icon { width: 30px; height: 30px; font-size: 15px; border-radius: 7px; }
+    .weapon-icon .lvl { font-size: 8px; padding: 0 3px; line-height: 11px; bottom: -4px; right: -4px; }
   }
 
   /* ---------- Overlays ---------- */
@@ -180,7 +199,7 @@
     <div id="hpWrap"><div id="hpBarFill"></div></div>
     <div id="hpLabel">HP 100/100</div>
     <div id="killCounter">☠ 0</div>
-    <div id="weaponRow"></div>
+    <div id="slotBar"></div>
     <canvas id="minimap" width="148" height="148"></canvas>
   </div>
 
@@ -188,7 +207,7 @@
   <div id="startOverlay" class="overlay">
     <h1>Peitsch den Markus: Survivors</h1>
     <p>WASD / Pfeiltasten bzw. Finger ziehen zum Bewegen durch die 3D-Welt. Waffen feuern automatisch.</p>
-    <p>XP sammeln, aufleveln, die Markus-Horde überleben! Die Minimap zeigt dir den Weg zu Bossen 💀, Schreinen ⭐ (permanente Boni), Truhen 🧰 und Essen 🥨.</p>
+    <p>XP sammeln, aufleveln, die Markus-Horde überleben! Die Minimap zeigt dir den Weg zu Bossen 💀, Schreinen ⭐ (permanente Boni), Truhen 🧰 und Essen 🥨. Hin und wieder taucht der scheue 🌟 Goldene Markus auf – erwisch ihn schnell, bevor er wieder verschwindet!</p>
     <button class="btn" id="startBtn">Los geht's!</button>
     <div class="hint">Esc = Pause</div>
   </div>
