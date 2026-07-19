@@ -428,9 +428,9 @@
             trunkMesh.setMatrixAt(trunkN++, _m4);
           }
           const canopyColor = new THREE.Color().setHSL(
-            0.42 + hash2(gx + 9, gz + 9) * 0.18,
-            0.28 + hash2(gx + 8, gz + 8) * 0.15,
-            0.16 + hash2(gx + 7, gz + 7) * 0.08
+            0.5 + hash2(gx + 9, gz + 9) * 0.22,
+            0.22 + hash2(gx + 8, gz + 8) * 0.14,
+            0.11 + hash2(gx + 7, gz + 7) * 0.06
           );
           const canH = 1.1 * s;
           _scaleV.set(canH, canH, canH);
