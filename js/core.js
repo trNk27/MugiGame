@@ -1,12 +1,29 @@
 // ============================================================================
-// Peitsch den Markus: Survivors — CORE ENGINE
+// Peitsch den Markus: Survivors — 3D CORE ENGINE (three.js, r144, global THREE)
 // ----------------------------------------------------------------------------
-// Owns: canvas/camera, player, enemies, xp/gems, particles, HUD, sfx, the
-// game-state machine, and the main loop. Weapons live in js/weapons.js and
-// are driven through the small API documented at the top of that file.
+// Owns: renderer/scene/camera, player, enemies, xp/gems, particles, HUD, sfx,
+// the game-state machine, and the main loop. Weapons live in js/weapons.js
+// and are driven through the small API documented at the top of that file.
 //
 // Everything is exposed on the shared global namespace `window.MG` so plain
 // <script> tags (no modules) can share state and work under file://.
+//
+// ---------------------------------------------------------------------------
+// COORDINATE SYSTEM
+// All gameplay logic lives on the ground plane in XZ (2D x -> x, 2D y -> z).
+// Entities carry a small `y` purely for visual placement (bob height, sprite
+// billboards, etc.) — collision/hitboxes/AI never read `y`. World "forward /
+// up-screen" (W key) is -Z; the camera never rotates.
+//
+// WORLD_SCALE
+// The original 2D game tuned everything in CSS-pixel units (speeds, radii,
+// ranges, knockback...). To keep every one of those tuning numbers valid we
+// simply convert px -> world units by a single constant, applied at the
+// point each px value is turned into a live stat:
+//   40 px (2D) == 1 world unit (3D)
+// See `MG.WORLD_SCALE` / `MG.px()` below. Pure ratios/multipliers (e.g. the
+// "×6" in the gem-magnet speed formula) are NOT distances and are left
+// unscaled — only additive lengths/speeds get the conversion.
 // ============================================================================
 (function () {
   "use strict";
@@ -16,31 +33,179 @@
   // file) can push into the registry as soon as it runs.
   MG.weapons = MG.weapons || { registry: [], owned: [] };
 
+  // 40 px (2D) == 1 world unit (3D). Documented once, used everywhere.
+  const WORLD_SCALE = 1 / 40;
+  MG.WORLD_SCALE = WORLD_SCALE;
+  MG.px = function (n) { return n * WORLD_SCALE; }; // convert a 2D px tuning value -> world units
+  const FX_Y = 0.05; // small lift above ground for effect meshes, avoids z-fighting
+  MG.FX_Y = FX_Y;
+
   // ---------------------------------------------------------------------
-  // Canvas / resize
+  // Renderer / scene / camera
   // ---------------------------------------------------------------------
   const canvas = document.getElementById("c");
-  const ctx = canvas.getContext("2d");
   const wrap = document.getElementById("game-wrap");
 
-  let W = 0, H = 0, DPR = 1;
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  MG.renderer = renderer; // exposed for QA (renderer.info.memory.*)
+
+  const scene = new THREE.Scene();
+  MG.scene = scene;
+  scene.background = new THREE.Color(0x05060a);
+  scene.fog = new THREE.Fog(0x0b0f1a, 14, 46);
+
+  // fxRoot: weapons add their own three.js visual-effect objects here.
+  // Cleared (all children removed + geometries/materials disposed, except
+  // any geometry/material flagged `.shared = true` which weapons re-use
+  // across instances) on every resetGame(). See js/weapons.js header.
+  const fxRoot = new THREE.Group();
+  scene.add(fxRoot);
+  MG.fxRoot = fxRoot;
+
+  const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 120);
+  const CAM_OFFSET = new THREE.Vector3(0, 13, 11);
+  const CAM_LOOK_Y = 1.1;
+  const CAM_LERP_RATE = 8; // ~8/s smoothing
+
   function resize() {
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = wrap.clientWidth;
-    H = wrap.clientHeight;
-    canvas.width = Math.floor(W * DPR);
-    canvas.height = Math.floor(H * DPR);
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const W = wrap.clientWidth, H = wrap.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(W, H, false);
+    camera.aspect = W / Math.max(1, H);
+    camera.updateProjectionMatrix();
+    viewRadiusDirty = true;
   }
   window.addEventListener("resize", resize);
-  resize();
+
+  // ---------------------------------------------------------------------
+  // Lighting
+  // ---------------------------------------------------------------------
+  const hemi = new THREE.HemisphereLight(0x8fa8ff, 0x11121a, 0.9);
+  scene.add(hemi);
+  const dirLight = new THREE.DirectionalLight(0xfff2d6, 1.05);
+  dirLight.position.set(-6, 10, 4);
+  scene.add(dirLight);
+  const ambient = new THREE.AmbientLight(0x223047, 0.35);
+  scene.add(ambient);
+
+  // ---------------------------------------------------------------------
+  // Ground — procedural CanvasTexture, RepeatWrapping, offset scrolls with
+  // the player so the pattern stays fixed in world space (infinite feel)
+  // while a single large plane always sits centered under the player.
+  // ---------------------------------------------------------------------
+  const TILE_WORLD = MG.px(80); // one texture tile == 80 old-2D px == 2 world units
+  const GROUND_SIZE = 90; // world units; plane always re-centers on the player
+
+  function buildGroundTexture() {
+    const cnv = document.createElement("canvas");
+    cnv.width = 256; cnv.height = 256;
+    const g = cnv.getContext("2d");
+    g.fillStyle = "#141b2e";
+    g.fillRect(0, 0, 256, 256);
+    g.strokeStyle = "rgba(255,255,255,0.06)";
+    g.lineWidth = 2;
+    g.strokeRect(1, 1, 254, 254);
+    // sparse deterministic dots
+    let seed = 7;
+    function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+    g.fillStyle = "rgba(255,255,255,0.07)";
+    for (let i = 0; i < 10; i++) {
+      const x = rnd() * 256, y = rnd() * 256, s = 1.2 + rnd() * 1.6;
+      g.beginPath(); g.arc(x, y, s, 0, Math.PI * 2); g.fill();
+    }
+    const tex = new THREE.CanvasTexture(cnv);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(GROUND_SIZE / TILE_WORLD, GROUND_SIZE / TILE_WORLD);
+    tex.magFilter = THREE.NearestFilter;
+    return tex;
+  }
+  const groundTex = buildGroundTexture();
+  const groundGeo = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, 1, 1);
+  groundGeo.rotateX(-Math.PI / 2);
+  const groundMat = new THREE.MeshLambertMaterial({ map: groundTex });
+  const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+  scene.add(groundMesh);
+
+  function updateGround() {
+    groundMesh.position.set(player.x, 0, player.z);
+    groundTex.offset.set(player.x / TILE_WORLD, player.z / TILE_WORLD);
+  }
+
+  // ---------------------------------------------------------------------
+  // Scatter decoration (rocks/trees) — deterministic grid hash, purely
+  // cosmetic (no collision). Repositioned via two InstancedMeshes whenever
+  // the player crosses into a new scatter cell.
+  // ---------------------------------------------------------------------
+  function hash2(a, b) {
+    let x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
+    return x - Math.floor(x);
+  }
+  const SCATTER_CELL = 5.5;
+  const SCATTER_RADIUS_CELLS = 7;
+  const MAX_ROCKS = 40, MAX_TREES = 24;
+  const rockGeo = new THREE.BoxGeometry(1, 1, 1);
+  const treeGeo = new THREE.ConeGeometry(0.45, 1.3, 6);
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x2a3350, roughness: 0.9 });
+  const treeMat = new THREE.MeshStandardMaterial({ color: 0x342a55, roughness: 0.85 });
+  const rockMesh = new THREE.InstancedMesh(rockGeo, rockMat, MAX_ROCKS);
+  const treeMesh = new THREE.InstancedMesh(treeGeo, treeMat, MAX_TREES);
+  rockMesh.count = 0; treeMesh.count = 0;
+  scene.add(rockMesh, treeMesh);
+  const _m4 = new THREE.Matrix4();
+  const _quat = new THREE.Quaternion();
+  const _scaleV = new THREE.Vector3(1, 1, 1);
+  let lastScatterCX = null, lastScatterCZ = null;
+
+  function refreshScatter() {
+    const cx = Math.floor(player.x / SCATTER_CELL);
+    const cz = Math.floor(player.z / SCATTER_CELL);
+    if (cx === lastScatterCX && cz === lastScatterCZ) return;
+    lastScatterCX = cx; lastScatterCZ = cz;
+    let rockN = 0, treeN = 0;
+    for (let dx = -SCATTER_RADIUS_CELLS; dx <= SCATTER_RADIUS_CELLS && (rockN < MAX_ROCKS || treeN < MAX_TREES); dx++) {
+      for (let dz = -SCATTER_RADIUS_CELLS; dz <= SCATTER_RADIUS_CELLS; dz++) {
+        const gx = cx + dx, gz = cz + dz;
+        const h = hash2(gx, gz);
+        if (h > 0.22) continue; // sparse
+        const isTree = hash2(gx + 91.7, gz - 13.3) > 0.5;
+        const jx = (hash2(gx + 3.1, gz) - 0.5) * SCATTER_CELL * 0.7;
+        const jz = (hash2(gx, gz + 3.1) - 0.5) * SCATTER_CELL * 0.7;
+        const wx = (gx + 0.5) * SCATTER_CELL + jx;
+        const wz = (gz + 0.5) * SCATTER_CELL + jz;
+        const distToPlayer = Math.hypot(wx - player.x, wz - player.z);
+        if (distToPlayer < 2.5) continue; // keep a small deadzone clear right around the player
+        if (isTree) {
+          if (treeN >= MAX_TREES) continue;
+          const s = 0.6 + hash2(gx, gz + 55) * 0.55;
+          const yMul = 0.9 + hash2(gx + 1, gz) * 0.3;
+          _scaleV.set(s, s * yMul, s);
+          _quat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), hash2(gx, gz + 200) * Math.PI * 2);
+          _m4.compose(new THREE.Vector3(wx, (1.3 * _scaleV.y) / 2, wz), _quat, _scaleV);
+          treeMesh.setMatrixAt(treeN++, _m4);
+        } else {
+          if (rockN >= MAX_ROCKS) continue;
+          const s = 0.35 + hash2(gx + 2, gz) * 0.55;
+          _scaleV.set(s, s, s);
+          _quat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), hash2(gx, gz + 400) * Math.PI * 2);
+          _m4.compose(new THREE.Vector3(wx, s / 2, wz), _quat, _scaleV);
+          rockMesh.setMatrixAt(rockN++, _m4);
+        }
+      }
+    }
+    rockMesh.count = rockN; treeMesh.count = treeN;
+    rockMesh.instanceMatrix.needsUpdate = true;
+    treeMesh.instanceMatrix.needsUpdate = true;
+  }
 
   // ---------------------------------------------------------------------
   // Assets — markus.png is a JPEG-ish cutout on a near-black background
-  // (no real alpha channel). Chroma-key the black away once at load so it
-  // draws as a clean transparent cutout everywhere else in the game.
+  // (no real alpha channel). Chroma-key the black away once at load (same
+  // routine as the 2D game) so it draws as a clean transparent cutout.
   // ---------------------------------------------------------------------
-  let markusImg = null;
+  let markusTexture = null;
   let imgReady = false;
   const markusRaw = new Image();
   markusRaw.onload = () => {
@@ -59,19 +224,24 @@
         else if (maxc < 60) d[i + 3] = Math.round(((maxc - 28) / (60 - 28)) * 255);
       }
       octx.putImageData(imgData, 0, 0);
-      markusImg = off;
-      imgReady = true;
+      markusTexture = new THREE.CanvasTexture(off);
     } catch (e) {
       // Cross-origin / file:// canvas read can fail in some browsers;
-      // fall back to drawing the raw image (still looks fine on a dark bg).
-      markusImg = markusRaw;
-      imgReady = true;
+      // fall back to the raw (un-keyed) image texture.
+      markusTexture = new THREE.Texture(markusRaw);
+      markusTexture.needsUpdate = true;
     }
+    markusTexture.colorSpace = THREE.SRGBColorSpace || markusTexture.colorSpace;
+    markusTexture.needsUpdate = true;
+    imgReady = true;
+    baseEnemySpriteMat = new THREE.SpriteMaterial({ map: markusTexture, transparent: true, depthWrite: false });
   };
   markusRaw.src = "assets/markus.png";
+  let baseEnemySpriteMat = new THREE.SpriteMaterial({ color: 0xcc9977, transparent: true }); // placeholder until image loads
 
   // ---------------------------------------------------------------------
-  // Audio (WebAudio only, synthesized, no files)
+  // Audio (WebAudio only, synthesized, no files) — unchanged from the 2D
+  // game (purely time-domain synthesis, no positions involved).
   // ---------------------------------------------------------------------
   let audioCtx = null;
   function ensureAudio() {
@@ -183,11 +353,15 @@
   MG.sfx = { crack: sfxCrack, hit: sfxHit, pickup: sfxPickup, levelup: sfxLevelup, hurt: sfxHurt, gameover: sfxGameover };
 
   // ---------------------------------------------------------------------
-  // Input: keyboard + a simple drag-anywhere virtual joystick for touch
+  // Input: keyboard + a simple drag-anywhere virtual joystick for touch.
+  // Mapping is identical to the 2D game: dx -> world x, dy(screen "up" is
+  // negative) -> world z, i.e. W/up-drag moves -z ("up the screen").
   // ---------------------------------------------------------------------
   const keys = new Set();
   const joystick = { active: false, id: null, baseX: 0, baseY: 0, curX: 0, curY: 0, dx: 0, dy: 0 };
   const JOY_R = 50;
+  const joyBaseEl = document.getElementById("joyBase");
+  const joyStickEl = document.getElementById("joyStick");
 
   function touchStart(e) {
     ensureAudio();
@@ -222,163 +396,202 @@
   canvas.addEventListener("mousedown", () => ensureAudio());
 
   function moveVector() {
-    let dx = 0, dy = 0;
+    let dx = 0, dz = 0;
     if (joystick.active) {
-      dx = joystick.dx; dy = joystick.dy;
+      dx = joystick.dx; dz = joystick.dy;
     } else {
-      if (keys.has("KeyW") || keys.has("ArrowUp")) dy -= 1;
-      if (keys.has("KeyS") || keys.has("ArrowDown")) dy += 1;
+      if (keys.has("KeyW") || keys.has("ArrowUp")) dz -= 1;
+      if (keys.has("KeyS") || keys.has("ArrowDown")) dz += 1;
       if (keys.has("KeyA") || keys.has("ArrowLeft")) dx -= 1;
       if (keys.has("KeyD") || keys.has("ArrowRight")) dx += 1;
     }
-    const mag = Math.min(1, Math.hypot(dx, dy));
-    let nx = 0, ny = 0;
-    const len = Math.hypot(dx, dy);
-    if (len > 0.001) { nx = dx / len; ny = dy / len; }
-    return { dirX: nx, dirY: ny, mag };
-  }
-
-  // ---------------------------------------------------------------------
-  // World / camera
-  // ---------------------------------------------------------------------
-  const camera = { x: 0, y: 0 };
-  MG.camera = camera;
-  function worldToScreen(x, y) { return { x: x - camera.x + W / 2, y: y - camera.y + H / 2 }; }
-  MG.worldToScreen = worldToScreen;
-
-  function hash2(a, b) {
-    let x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
-    return x - Math.floor(x);
-  }
-
-  function drawBackground() {
-    const grad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.85);
-    grad.addColorStop(0, "#141b2e");
-    grad.addColorStop(1, "#05060a");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, W, H);
-
-    // grid, offset by camera so movement reads clearly
-    const grid = 80;
-    const offX = ((camera.x - W / 2) % grid + grid) % grid;
-    const offY = ((camera.y - H / 2) % grid + grid) % grid;
-    ctx.strokeStyle = "rgba(255,255,255,0.045)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = -offX; x < W; x += grid) { ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); }
-    for (let y = -offY; y < H; y += grid) { ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); }
-    ctx.stroke();
-
-    // sparse dim dots, deterministic per world cell so they don't swim
-    const cell = 160;
-    const startX = Math.floor((camera.x - W / 2) / cell) - 1;
-    const endX = Math.floor((camera.x + W / 2) / cell) + 1;
-    const startY = Math.floor((camera.y - H / 2) / cell) - 1;
-    const endY = Math.floor((camera.y + H / 2) / cell) + 1;
-    ctx.fillStyle = "rgba(255,255,255,0.06)";
-    for (let cx = startX; cx <= endX; cx++) {
-      for (let cy = startY; cy <= endY; cy++) {
-        const h = hash2(cx, cy);
-        if (h < 0.3) {
-          const wx = cx * cell + h * cell;
-          const wy = cy * cell + hash2(cy, cx) * cell;
-          const s = worldToScreen(wx, wy);
-          ctx.beginPath(); ctx.arc(s.x, s.y, 1.4, 0, Math.PI * 2); ctx.fill();
-        }
-      }
-    }
+    const len = Math.hypot(dx, dz);
+    const mag = Math.min(1, len);
+    let nx = 0, nz = 0;
+    if (len > 0.001) { nx = dx / len; nz = dz / len; }
+    return { dirX: nx, dirZ: nz, mag };
   }
 
   // ---------------------------------------------------------------------
   // Player
   // ---------------------------------------------------------------------
   const player = {
-    x: 0, y: 0, r: 22,
+    x: 0, z: 0, r: MG.px(22),
     hp: 100,
-    stats: { speed: 220, maxHp: 130, regen: 0, pickupRadius: 90 },
-    facing: { x: 1, y: 0 },
+    stats: { speed: MG.px(220), maxHp: 130, regen: 0, pickupRadius: MG.px(90) },
+    facing: { x: 1, z: 0 },
     invuln: 0,
     bob: 0,
     moving: false,
   };
   MG.player = player;
 
+  // --- player mesh ---
+  const playerGroup = new THREE.Group();
+  const bodyGroup = new THREE.Group();
+  playerGroup.add(bodyGroup);
+  const coatMat = new THREE.MeshStandardMaterial({ color: 0x232a3d, roughness: 0.8 });
+  const skinMat = new THREE.MeshStandardMaterial({ color: 0xe8c39e, roughness: 0.7 });
+  const handleMat = new THREE.MeshStandardMaterial({ color: 0x7a4a1e, roughness: 0.6 });
+  const bodyGeo = new THREE.CapsuleGeometry(0.32, 0.62, 4, 8);
+  const bodyMesh = new THREE.Mesh(bodyGeo, coatMat);
+  bodyMesh.position.y = 0.32 + 0.31;
+  bodyGroup.add(bodyMesh);
+  const headGeo = new THREE.SphereGeometry(0.22, 12, 10);
+  const headMesh = new THREE.Mesh(headGeo, skinMat);
+  headMesh.position.y = 0.32 * 2 + 0.62 + 0.15;
+  bodyGroup.add(headMesh);
+  const handleGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.5, 6);
+  const handleMesh = new THREE.Mesh(handleGeo, handleMat);
+  handleMesh.position.set(0.3, 0.85, 0.05);
+  handleMesh.rotation.z = Math.PI / 2.6;
+  bodyGroup.add(handleMesh);
+  const shadowGeo = new THREE.CircleGeometry(0.42, 16);
+  shadowGeo.rotateX(-Math.PI / 2);
+  const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32, depthWrite: false });
+  const shadowMesh = new THREE.Mesh(shadowGeo, shadowMat);
+  shadowMesh.position.y = 0.01;
+  playerGroup.add(shadowMesh);
+  scene.add(playerGroup);
+  const playerMats = [coatMat, skinMat, handleMat];
+
+  let playerYaw = 0;
   function updatePlayer(dt) {
     const mv = moveVector();
     player.moving = mv.mag > 0.05;
     if (player.moving) {
       player.facing.x = mv.dirX;
-      player.facing.y = mv.dirY;
+      player.facing.z = mv.dirZ;
     }
     player.x += mv.dirX * mv.mag * player.stats.speed * dt;
-    player.y += mv.dirY * mv.mag * player.stats.speed * dt;
+    player.z += mv.dirZ * mv.mag * player.stats.speed * dt;
     player.bob += dt * (player.moving ? 9 : 2);
     if (player.stats.regen > 0) player.hp = Math.min(player.stats.maxHp, player.hp + player.stats.regen * dt);
     if (player.invuln > 0) player.invuln = Math.max(0, player.invuln - dt);
+
+    // visuals
+    const targetYaw = Math.atan2(player.facing.x, player.facing.z);
+    let dYaw = targetYaw - playerYaw;
+    while (dYaw > Math.PI) dYaw -= Math.PI * 2;
+    while (dYaw < -Math.PI) dYaw += Math.PI * 2;
+    playerYaw += dYaw * Math.min(1, dt * 10);
+    playerGroup.position.set(player.x, 0, player.z);
+    playerGroup.rotation.y = playerYaw;
+    const bobY = player.moving ? Math.sin(player.bob) * 0.05 : Math.sin(player.bob * 0.3) * 0.015;
+    bodyGroup.position.y = bobY;
+    const targetLean = player.moving ? -0.13 : 0;
+    bodyGroup.rotation.x += (targetLean - bodyGroup.rotation.x) * Math.min(1, dt * 8);
+    const blink = player.invuln > 0 && Math.floor(player.invuln * 20) % 2 === 0;
+    for (const m of playerMats) {
+      m.transparent = blink;
+      m.opacity = blink ? 0.35 : 1;
+    }
   }
 
   function handleContactDamage() {
     if (player.invuln > 0) return;
     for (const e of enemies) {
       if (e.dead) continue;
-      const d = Math.hypot(e.x - player.x, e.y - player.y);
+      const d = Math.hypot(e.x - player.x, e.z - player.z);
       if (d < e.r + player.r) {
         player.hp -= e.contactDmg;
-        player.invuln = 1.3; // widened alongside the ENEMY_TYPES dmg tuning above
+        player.invuln = 1.3;
         MG.sfx.hurt();
-        addParticles(player.x, player.y, "#ff5c5c", 10);
+        addParticles(player.x, player.z, "#ff5c5c", 10);
         if (player.hp <= 0) { player.hp = 0; gameOver(); }
         break;
       }
     }
   }
 
-  function drawPlayer() {
-    const s = worldToScreen(player.x, player.y);
-    const bobY = player.moving ? Math.sin(player.bob) * 3 : Math.sin(player.bob * 0.3) * 1;
-    ctx.save();
-    ctx.translate(s.x, s.y + bobY);
-    const flip = player.facing.x < 0 ? -1 : 1;
-    ctx.scale(flip, 1);
-    if (player.invuln > 0 && Math.floor(player.invuln * 20) % 2 === 0) ctx.globalAlpha = 0.35;
-    // shadow
-    ctx.fillStyle = "rgba(0,0,0,0.35)";
-    ctx.beginPath(); ctx.ellipse(0, 20, 15, 6, 0, 0, Math.PI * 2); ctx.fill();
-    // coat
-    ctx.fillStyle = "#232a3d";
-    ctx.beginPath();
-    ctx.moveTo(-12, 20);
-    ctx.lineTo(-14, -3);
-    ctx.quadraticCurveTo(0, -13, 14, -3);
-    ctx.lineTo(12, 20);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = "#161b29"; ctx.lineWidth = 1.5; ctx.stroke();
-    // head
-    ctx.fillStyle = "#e8c39e";
-    ctx.beginPath(); ctx.arc(0, -19, 9, 0, Math.PI * 2); ctx.fill();
-    // whip handle
-    ctx.strokeStyle = "#7a4a1e"; ctx.lineWidth = 3; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(10, 4); ctx.lineTo(21, 11); ctx.stroke();
-    ctx.restore();
+  // ---------------------------------------------------------------------
+  // Camera — third-person chase cam, fixed offset, no rotation, smoothed.
+  // ---------------------------------------------------------------------
+  let cameraInited = false;
+  function updateCamera(dt, snap) {
+    const desired = new THREE.Vector3(player.x + CAM_OFFSET.x, CAM_OFFSET.y, player.z + CAM_OFFSET.z);
+    if (snap || !cameraInited) {
+      camera.position.copy(desired);
+      cameraInited = true;
+    } else {
+      const t = 1 - Math.exp(-CAM_LERP_RATE * dt);
+      camera.position.lerp(desired, t);
+    }
+    camera.lookAt(player.x, CAM_LOOK_Y, player.z);
+  }
+
+  // Visible-ground FOOTPRINT, used for edge-of-view enemy spawning. The
+  // camera never rotates and keeps a fixed offset from the player, so this
+  // footprint (a quadrilateral in player-local XZ space) is a constant,
+  // recomputed only on resize / first use. A simple circular ring at "the"
+  // visible radius doesn't work well here — the ground footprint of a
+  // pitched-down camera is a strongly asymmetric trapezoid (near edge just
+  // ~13 units out, far corners ~40+), so a uniform-radius ring is either
+  // absurdly distant in most directions or on-screen in others. Instead we
+  // ray-cast from the player toward each spawn angle and find exactly
+  // where that ray exits the trapezoid, giving a snug, direction-aware
+  // "just off screen" spawn distance.
+  let viewRadiusDirty = true;
+  let footprint = null; // [{x,z}, ...] 4 corners, local (relative to player), CCW/CW perimeter order
+  const _vNear = new THREE.Vector3(), _vFar = new THREE.Vector3(), _vDir = new THREE.Vector3(), _vHit = new THREE.Vector3();
+  function groundHitLocal(nx, ny) {
+    _vNear.set(nx, ny, -1).unproject(camera);
+    _vFar.set(nx, ny, 1).unproject(camera);
+    _vDir.copy(_vFar).sub(_vNear);
+    if (Math.abs(_vDir.y) < 1e-6) return null;
+    const t = -_vNear.y / _vDir.y;
+    if (t < 0) return null;
+    _vHit.copy(_vNear).addScaledVector(_vDir, t);
+    return { x: _vHit.x - player.x, z: _vHit.z - player.z };
+  }
+  function computeFootprint() {
+    camera.updateMatrixWorld(true);
+    // perimeter order: near-left, near-right, far-right, far-left
+    const pts = [groundHitLocal(-1, -1), groundHitLocal(1, -1), groundHitLocal(1, 1), groundHitLocal(-1, 1)];
+    if (pts.every((p) => p)) footprint = pts;
+    viewRadiusDirty = false;
+  }
+  // Ray (from local origin, direction dx,dz) vs. segment (ax,az)-(bx,bz):
+  // returns the ray parameter t (>=0) at the crossing, or null.
+  function raySegT(dx, dz, ax, az, bx, bz) {
+    const v1x = -ax, v1z = -az;
+    const v2x = bx - ax, v2z = bz - az;
+    const v3x = -dz, v3z = dx;
+    const denom = v2x * v3x + v2z * v3z;
+    if (Math.abs(denom) < 1e-9) return null;
+    const t = (v2x * v1z - v2z * v1x) / denom;
+    const s = (v1x * v3x + v1z * v3z) / denom;
+    if (t >= 0 && s >= 0 && s <= 1) return t;
+    return null;
+  }
+  const FALLBACK_SPAWN_R = MG.px(360);
+  function spawnBoundaryDistance(theta) {
+    if (!footprint) return FALLBACK_SPAWN_R;
+    const dx = Math.cos(theta), dz = Math.sin(theta);
+    let best = null;
+    for (let i = 0; i < footprint.length; i++) {
+      const a = footprint[i], b = footprint[(i + 1) % footprint.length];
+      const t = raySegT(dx, dz, a.x, a.z, b.x, b.z);
+      if (t !== null && (best === null || t < best)) best = t;
+    }
+    return best === null ? FALLBACK_SPAWN_R : best;
   }
 
   // ---------------------------------------------------------------------
   // Enemies
   // ---------------------------------------------------------------------
-  // Balance note: contact damage only ever ticks once per player.invuln
-  // window (see handleContactDamage below) regardless of how many enemies
-  // are touching the player, so a fully idle/stationary player's time-to-
-  // death is essentially travel-time-to-first-contact + maxHp / (dmg /
-  // invuln). The original dmg values (10/8/20) killed an idle player in
-  // ~16s, well under the intended "not within ~30s" floor — tuned down
-  // here; this barely affects a moving/kiting player, since they take
-  // contact hits far less often to begin with.
+  // Balance note (ported verbatim from 2D): contact damage only ticks once
+  // per player.invuln window regardless of how many enemies are touching
+  // the player, so tuning stays governed by dmg / invuln, not enemy count.
   const ENEMY_TYPES = {
-    normal: { hp: 20, speed: 70, r: 26, dmg: 6, xp: 1 },
-    flitzer: { hp: 10, speed: 130, r: 18, dmg: 5, xp: 1 },
-    brocken: { hp: 90, speed: 40, r: 44, dmg: 13, xp: 5, tint: true },
+    normal: { hp: 20, speed: MG.px(70), r: MG.px(26), dmg: 6, xp: 1 },
+    flitzer: { hp: 10, speed: MG.px(130), r: MG.px(18), dmg: 5, xp: 1 },
+    brocken: { hp: 90, speed: MG.px(40), r: MG.px(44), dmg: 13, xp: 5, tint: true },
   };
+  const TINT_COLOR = new THREE.Color(0xdd5c4a);
+  const SLOW_COLOR = new THREE.Color(0x8fd7ff);
+  const NORMAL_COLOR = new THREE.Color(0xffffff);
+  const FLASH_COLOR = new THREE.Color(0xffffff);
   const MAX_ENEMIES = 250;
   const enemies = [];
   MG.enemies = enemies;
@@ -396,61 +609,86 @@
     if (r < 0.8) return "flitzer";
     return "brocken";
   }
+
+  function makeEnemySprite() {
+    const mat = baseEnemySpriteMat.clone();
+    const spr = new THREE.Sprite(mat);
+    scene.add(spr);
+    return spr;
+  }
+
   function spawnEnemy(type) {
+    if (viewRadiusDirty) computeFootprint();
     const t = ENEMY_TYPES[type];
     // Ease-in: spawn at 70% HP, ramping to full over the first 90s so the
     // opening minute stays gentle; the +10%/min growth applies throughout.
-    // 70% also puts early normals (14 HP) under the starter whip's 15 dmg,
-    // so the opening seconds one-shot cleanly instead of leaving slivers.
     const earlyMul = Math.min(1, 0.7 + 0.3 * (gameTime / 90));
     const hpMul = earlyMul * (1 + 0.1 * (gameTime / 60));
-    const margin = 80;
-    const halfW = W / 2 + margin, halfH = H / 2 + margin;
-    const edge = Math.floor(Math.random() * 4);
-    let ex, ey;
-    if (edge === 0) { ex = camera.x + (Math.random() * 2 - 1) * halfW; ey = camera.y - halfH; }
-    else if (edge === 1) { ex = camera.x + (Math.random() * 2 - 1) * halfW; ey = camera.y + halfH; }
-    else if (edge === 2) { ex = camera.x - halfW; ey = camera.y + (Math.random() * 2 - 1) * halfH; }
-    else { ex = camera.x + halfW; ey = camera.y + (Math.random() * 2 - 1) * halfH; }
+    const a = Math.random() * Math.PI * 2;
+    // Just outside the visible ground footprint in this exact direction
+    // (see computeFootprint/spawnBoundaryDistance above), plus a flat
+    // margin so pop-in is never visible even with camera-lerp slack.
+    const ringR = spawnBoundaryDistance(a) * 1.15 + MG.px(60);
+    const ex = player.x + Math.cos(a) * ringR;
+    const ez = player.z + Math.sin(a) * ringR;
+    const sprite = makeEnemySprite();
+    const d = t.r * 2;
+    sprite.scale.set(d, d, 1);
+    sprite.position.set(ex, t.r, ez);
     enemies.push({
-      type, x: ex, y: ey,
+      type, x: ex, z: ez, y: t.r,
       hp: t.hp * hpMul, maxHp: t.hp * hpMul,
       speed: t.speed, r: t.r, contactDmg: t.dmg, xp: t.xp,
-      angle: Math.random() * Math.PI * 2,
-      hitFlash: 0, knockX: 0, knockY: 0, dead: false,
+      wobble: Math.random() * Math.PI * 2,
+      hitFlash: 0, knockX: 0, knockZ: 0, dead: false,
       tint: !!t.tint,
       // Slow-effect hook (used by e.g. Frostpeitsche): while gameTime <
       // slowUntil, movement speed is multiplied by slowFactor.
       slowUntil: 0, slowFactor: 1,
+      sprite,
     });
   }
 
+  // Reused across frames to avoid a fresh Map + N bucket-array allocations
+  // every frame at up to MAX_ENEMIES concurrent enemies (bucket membership
+  // itself must still be rebuilt each frame since enemies keep moving
+  // between cells, but the Map and its bucket arrays are recycled).
+  const sepGrid = new Map();
+  const sepBucketPool = [];
+  let sepBucketsUsed = 0;
   function separationPass() {
-    const cellSize = 100;
-    const grid = new Map();
-    const key = (cx, cy) => cx + "," + cy;
+    const cellSize = MG.px(100);
+    sepGrid.clear();
+    sepBucketsUsed = 0;
+    const key = (cx, cz) => cx + "," + cz;
     for (const e of enemies) {
-      const cx = Math.floor(e.x / cellSize), cy = Math.floor(e.y / cellSize);
-      const k = key(cx, cy);
-      let b = grid.get(k);
-      if (!b) { b = []; grid.set(k, b); }
+      const cx = Math.floor(e.x / cellSize), cz = Math.floor(e.z / cellSize);
+      const k = key(cx, cz);
+      let b = sepGrid.get(k);
+      if (!b) {
+        b = sepBucketPool[sepBucketsUsed];
+        if (!b) { b = []; sepBucketPool[sepBucketsUsed] = b; }
+        b.length = 0;
+        sepBucketsUsed++;
+        sepGrid.set(k, b);
+      }
       b.push(e);
     }
     for (const e of enemies) {
-      const cx = Math.floor(e.x / cellSize), cy = Math.floor(e.y / cellSize);
+      const cx = Math.floor(e.x / cellSize), cz = Math.floor(e.z / cellSize);
       for (let ox = -1; ox <= 1; ox++) {
-        for (let oy = -1; oy <= 1; oy++) {
-          const bucket = grid.get(key(cx + ox, cy + oy));
+        for (let oz = -1; oz <= 1; oz++) {
+          const bucket = sepGrid.get(key(cx + ox, cz + oz));
           if (!bucket) continue;
           for (const other of bucket) {
             if (other === e) continue;
-            const dx = e.x - other.x, dy = e.y - other.y;
-            const dist = Math.hypot(dx, dy);
-            const minDist = e.r + other.r - 6;
+            const dx = e.x - other.x, dz = e.z - other.z;
+            const dist = Math.hypot(dx, dz);
+            const minDist = e.r + other.r - MG.px(6);
             if (dist > 0 && dist < minDist) {
               const push = (minDist - dist) * 0.5;
               e.x += (dx / dist) * push * 0.5;
-              e.y += (dy / dist) * push * 0.5;
+              e.z += (dz / dist) * push * 0.5;
             }
           }
         }
@@ -458,49 +696,40 @@
     }
   }
 
+  function disposeEnemy(e) {
+    scene.remove(e.sprite);
+    e.sprite.material.dispose();
+  }
+
   function updateEnemies(dt) {
+    const t = performance.now() / 1000;
     for (let i = enemies.length - 1; i >= 0; i--) {
       const e = enemies[i];
-      if (e.dead) { enemies.splice(i, 1); continue; }
-      const dx = player.x - e.x, dy = player.y - e.y;
-      const d = Math.hypot(dx, dy) || 1;
+      if (e.dead) { disposeEnemy(e); enemies.splice(i, 1); continue; }
+      const dx = player.x - e.x, dz = player.z - e.z;
+      const d = Math.hypot(dx, dz) || 1;
       const slowMul = gameTime < e.slowUntil ? e.slowFactor : 1;
-      let vx = (dx / d) * e.speed * slowMul, vy = (dy / d) * e.speed * slowMul;
-      vx += e.knockX; vy += e.knockY;
+      let vx = (dx / d) * e.speed * slowMul, vz = (dz / d) * e.speed * slowMul;
+      vx += e.knockX; vz += e.knockZ;
       const decay = Math.max(0, 1 - dt * 6);
-      e.knockX *= decay; e.knockY *= decay;
-      e.x += vx * dt; e.y += vy * dt;
-      e.angle += (1.5 + e.speed * 0.015) * dt;
+      e.knockX *= decay; e.knockZ *= decay;
+      e.x += vx * dt; e.z += vz * dt;
+      e.wobble += (1.5 + e.speed * 0.6) * dt;
       if (e.hitFlash > 0) e.hitFlash = Math.max(0, e.hitFlash - dt * 4);
     }
     separationPass();
-  }
-
-  function drawEnemy(e) {
-    const s = worldToScreen(e.x, e.y);
-    if (s.x < -100 || s.x > W + 100 || s.y < -100 || s.y > H + 100) return;
-    ctx.save();
-    ctx.translate(s.x, s.y);
-    ctx.rotate(e.angle);
-    const d = e.r * 2;
-    if (imgReady) {
+    for (const e of enemies) {
+      const bob = Math.sin(e.wobble) * e.r * 0.12;
+      e.sprite.position.set(e.x, e.r + bob, e.z);
+      e.sprite.material.rotation = Math.sin(e.wobble * 0.7) * 0.18;
       const slowed = gameTime < e.slowUntil;
-      if (slowed) ctx.filter = "brightness(1.05) sepia(1) saturate(4) hue-rotate(150deg)";
-      else if (e.tint) ctx.filter = "brightness(0.8) sepia(1) saturate(5) hue-rotate(-45deg)";
-      ctx.drawImage(markusImg, -e.r, -e.r, d, d);
-      ctx.filter = "none";
+      const base = slowed ? SLOW_COLOR : (e.tint ? TINT_COLOR : NORMAL_COLOR);
       if (e.hitFlash > 0) {
-        ctx.globalCompositeOperation = "lighter";
-        ctx.globalAlpha = e.hitFlash * 0.7;
-        ctx.drawImage(markusImg, -e.r, -e.r, d, d);
-        ctx.globalAlpha = 1;
-        ctx.globalCompositeOperation = "source-over";
+        e.sprite.material.color.copy(base).lerp(FLASH_COLOR, e.hitFlash * 0.75);
+      } else {
+        e.sprite.material.color.copy(base);
       }
-    } else {
-      ctx.fillStyle = e.tint ? "#a05050" : "#cc9977";
-      ctx.beginPath(); ctx.arc(0, 0, e.r, 0, Math.PI * 2); ctx.fill();
     }
-    ctx.restore();
   }
 
   // ---------------------------------------------------------------------
@@ -513,38 +742,38 @@
     enemy.hp -= dmg;
     enemy.hitFlash = 1;
     const fx = opts.fromX !== undefined ? opts.fromX : player.x;
-    const fy = opts.fromY !== undefined ? opts.fromY : player.y;
-    const dx = enemy.x - fx, dy = enemy.y - fy;
-    const d = Math.hypot(dx, dy) || 1;
-    const kb = opts.knockback !== undefined ? opts.knockback : 140;
+    const fz = opts.fromZ !== undefined ? opts.fromZ : player.z;
+    const dx = enemy.x - fx, dz = enemy.z - fz;
+    const d = Math.hypot(dx, dz) || 1;
+    const kb = opts.knockback !== undefined ? opts.knockback : MG.px(140);
     enemy.knockX = (dx / d) * kb;
-    enemy.knockY = (dy / d) * kb;
-    spawnDamageNumber(enemy.x, enemy.y - enemy.r, dmg);
+    enemy.knockZ = (dz / d) * kb;
+    spawnDamageNumber(enemy.x, enemy.r * 2 + 0.2, enemy.z, dmg);
     if (enemy.hp <= 0 && !enemy.dead) {
       enemy.dead = true;
-      addParticles(enemy.x, enemy.y, "#ff8a8a", 16);
-      spawnGem(enemy.x, enemy.y, enemy.xp);
+      addParticles(enemy.x, enemy.z, "#ff8a8a", 16);
+      spawnGem(enemy.x, enemy.z, enemy.xp);
       killCount++;
     }
   }
   MG.hitEnemy = hitEnemy;
 
-  function enemiesInRadius(x, y, r) {
+  function enemiesInRadius(x, z, r) {
     const out = [];
     for (const e of enemies) {
       if (e.dead) continue;
-      if (Math.hypot(e.x - x, e.y - y) <= r + e.r) out.push(e);
+      if (Math.hypot(e.x - x, e.z - z) <= r + e.r) out.push(e);
     }
     return out;
   }
   MG.enemiesInRadius = enemiesInRadius;
 
-  function nearestEnemy(x, y, maxDist) {
+  function nearestEnemy(x, z, maxDist) {
     let best = null;
     let bestD = maxDist === undefined ? Infinity : maxDist;
     for (const e of enemies) {
       if (e.dead) continue;
-      const d = Math.hypot(e.x - x, e.y - y);
+      const d = Math.hypot(e.x - x, e.z - z);
       if (d <= bestD) { bestD = d; best = e; }
     }
     return best;
@@ -552,108 +781,160 @@
   MG.nearestEnemy = nearestEnemy;
 
   // ---------------------------------------------------------------------
-  // Particles & floating damage numbers
+  // Particles (pooled THREE.Points) & floating damage numbers (pooled
+  // canvas-texture sprites).
   // ---------------------------------------------------------------------
   const MAX_PARTICLES = 300;
-  const MAX_DMG_NUMBERS = 80;
-  const particles = [];
-  const damageNumbers = [];
+  const particlePool = [];
+  const particlePos = new Float32Array(MAX_PARTICLES * 3);
+  const particleCol = new Float32Array(MAX_PARTICLES * 3);
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    particlePool.push({ active: false, x: 0, y: 0.3, z: 0, vx: 0, vy: 0, vz: 0, life: 0, color: new THREE.Color() });
+  }
+  const particleGeo = new THREE.BufferGeometry();
+  particleGeo.setAttribute("position", new THREE.BufferAttribute(particlePos, 3));
+  particleGeo.setAttribute("color", new THREE.BufferAttribute(particleCol, 3));
+  const particleMat = new THREE.PointsMaterial({
+    size: 0.14, vertexColors: true, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, sizeAttenuation: true,
+  });
+  const particlePoints = new THREE.Points(particleGeo, particleMat);
+  scene.add(particlePoints);
 
-  function addParticles(x, y, color, n) {
-    for (let i = 0; i < n; i++) {
-      if (particles.length >= MAX_PARTICLES) break;
+  function addParticles(x, z, colorHex, n) {
+    const c = new THREE.Color(colorHex);
+    let spawned = 0;
+    for (let i = 0; i < particlePool.length && spawned < n; i++) {
+      const p = particlePool[i];
+      if (p.active) continue;
       const a = Math.random() * Math.PI * 2;
-      const sp = 40 + Math.random() * 160;
-      particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, color, size: 2 + Math.random() * 3 });
+      const sp = MG.px(40 + Math.random() * 160);
+      p.active = true;
+      p.x = x; p.y = 0.3; p.z = z;
+      p.vx = Math.cos(a) * sp; p.vz = Math.sin(a) * sp; p.vy = MG.px(30 + Math.random() * 40);
+      p.life = 1;
+      p.color.copy(c);
+      spawned++;
     }
   }
   MG.addParticles = addParticles;
 
-  function spawnDamageNumber(x, y, dmg) {
-    if (damageNumbers.length >= MAX_DMG_NUMBERS) damageNumbers.shift();
-    damageNumbers.push({ x, y, text: Math.round(dmg).toString(), life: 1 });
+  function updateParticles(dt) {
+    for (let i = 0; i < particlePool.length; i++) {
+      const p = particlePool[i];
+      const base = i * 3;
+      if (!p.active) {
+        particleCol[base] = 0; particleCol[base + 1] = 0; particleCol[base + 2] = 0;
+        continue;
+      }
+      const damp = Math.max(0, 1 - dt * 2);
+      p.vx *= damp; p.vz *= damp; p.vy -= dt * 1.4;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+      p.life -= dt * 1.8;
+      if (p.life <= 0) { p.active = false; particleCol[base] = 0; particleCol[base + 1] = 0; particleCol[base + 2] = 0; continue; }
+      particlePos[base] = p.x; particlePos[base + 1] = Math.max(0, p.y); particlePos[base + 2] = p.z;
+      const l = Math.max(0, p.life);
+      particleCol[base] = p.color.r * l; particleCol[base + 1] = p.color.g * l; particleCol[base + 2] = p.color.b * l;
+    }
+    particleGeo.attributes.position.needsUpdate = true;
+    particleGeo.attributes.color.needsUpdate = true;
+  }
+  function resetParticles() {
+    for (const p of particlePool) p.active = false;
+    particleCol.fill(0);
+    particleGeo.attributes.color.needsUpdate = true;
   }
 
-  function updateParticles(dt) {
-    for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i];
-      const damp = Math.max(0, 1 - dt * 2);
-      p.vx *= damp; p.vy *= damp;
-      p.x += p.vx * dt; p.y += p.vy * dt;
-      p.life -= dt * 1.8;
-      if (p.life <= 0) particles.splice(i, 1);
+  const MAX_DMG_NUMBERS = 80;
+  const dmgPool = [];
+  function initDamageNumberPool() {
+    for (let i = 0; i < MAX_DMG_NUMBERS; i++) {
+      const cnv = document.createElement("canvas");
+      cnv.width = 64; cnv.height = 32;
+      const c2 = cnv.getContext("2d");
+      const tex = new THREE.CanvasTexture(cnv);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+      const spr = new THREE.Sprite(mat);
+      spr.scale.set(0.9, 0.45, 1);
+      spr.visible = false;
+      scene.add(spr);
+      dmgPool.push({ sprite: spr, canvas: cnv, ctx: c2, tex, active: false, life: 0, y: 0 });
     }
+  }
+  let dmgCursor = 0;
+  function spawnDamageNumber(x, y, z, dmg) {
+    const slot = dmgPool[dmgCursor];
+    dmgCursor = (dmgCursor + 1) % dmgPool.length;
+    slot.active = true; slot.life = 1; slot.y = y;
+    const c = slot.ctx;
+    c.clearRect(0, 0, 64, 32);
+    c.font = "bold 20px 'Trebuchet MS', sans-serif";
+    c.textAlign = "center"; c.textBaseline = "middle";
+    c.fillStyle = "#fff2a8";
+    c.fillText(Math.round(dmg).toString(), 32, 16);
+    slot.tex.needsUpdate = true;
+    slot.sprite.visible = true;
+    slot.sprite.material.opacity = 1;
+    slot.sprite.position.set(x, y, z);
   }
   function updateDamageNumbers(dt) {
-    for (let i = damageNumbers.length - 1; i >= 0; i--) {
-      const dn = damageNumbers[i];
-      dn.y -= 40 * dt;
-      dn.life -= dt * 1.2;
-      if (dn.life <= 0) damageNumbers.splice(i, 1);
+    for (const slot of dmgPool) {
+      if (!slot.active) continue;
+      slot.y += MG.px(40) * dt;
+      slot.life -= dt * 1.2;
+      slot.sprite.position.y = slot.y;
+      slot.sprite.material.opacity = Math.max(0, slot.life);
+      if (slot.life <= 0) { slot.active = false; slot.sprite.visible = false; }
     }
   }
-  function drawParticles() {
-    for (const p of particles) {
-      const s = worldToScreen(p.x, p.y);
-      ctx.globalAlpha = Math.max(0, p.life);
-      ctx.fillStyle = p.color;
-      ctx.beginPath(); ctx.arc(s.x, s.y, p.size, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  }
-  function drawDamageNumbers() {
-    ctx.font = "bold 13px 'Trebuchet MS', sans-serif";
-    ctx.textAlign = "center";
-    for (const dn of damageNumbers) {
-      const s = worldToScreen(dn.x, dn.y);
-      ctx.globalAlpha = Math.max(0, dn.life);
-      ctx.fillStyle = "#fff2a8";
-      ctx.fillText(dn.text, s.x, s.y);
-    }
-    ctx.globalAlpha = 1;
+  function resetDamageNumbers() {
+    for (const slot of dmgPool) { slot.active = false; slot.sprite.visible = false; }
+    dmgCursor = 0;
   }
 
   // ---------------------------------------------------------------------
   // XP gems
   // ---------------------------------------------------------------------
+  const gemGeo = new THREE.OctahedronGeometry(1, 0);
+  const gemMatCyan = new THREE.MeshStandardMaterial({ color: 0x7ee0ff, emissive: 0x1c6a80, emissiveIntensity: 0.8, roughness: 0.35 });
+  const gemMatGold = new THREE.MeshStandardMaterial({ color: 0xffd54a, emissive: 0x8a5a00, emissiveIntensity: 0.8, roughness: 0.35 });
   const gems = [];
-  function spawnGem(x, y, value) {
-    gems.push({ x, y, value, r: value >= 5 ? 7 : 5 });
+  function spawnGem(x, z, value) {
+    const big = value >= 5;
+    const r = MG.px(big ? 7 : 5);
+    const mesh = new THREE.Mesh(gemGeo, big ? gemMatGold : gemMatCyan);
+    mesh.scale.set(r, r, r);
+    mesh.position.set(x, r + 0.15, z);
+    scene.add(mesh);
+    gems.push({ x, z, value, r, baseY: r + 0.15, mesh, spin: Math.random() * Math.PI * 2 });
   }
   function updateGems(dt) {
     for (let i = gems.length - 1; i >= 0; i--) {
       const g = gems[i];
-      const dx = player.x - g.x, dy = player.y - g.y;
-      const d = Math.hypot(dx, dy);
+      const dx = player.x - g.x, dz = player.z - g.z;
+      const d = Math.hypot(dx, dz);
       if (d < player.stats.pickupRadius) {
-        const speed = Math.max(260, (player.stats.pickupRadius - d) * 6);
+        const speed = Math.max(MG.px(260), (player.stats.pickupRadius - d) * 6);
         const nd = d || 1;
         g.x += (dx / nd) * speed * dt;
-        g.y += (dy / nd) * speed * dt;
+        g.z += (dz / nd) * speed * dt;
       }
-      if (d < 16) {
+      g.spin += dt * 2.4;
+      g.mesh.position.set(g.x, g.baseY + Math.sin(g.spin * 1.6) * 0.08, g.z);
+      g.mesh.rotation.y = g.spin;
+      g.mesh.rotation.x = g.spin * 0.6;
+      if (d < MG.px(16)) {
+        scene.remove(g.mesh);
         gems.splice(i, 1);
         addXP(g.value);
         MG.sfx.pickup();
-        addParticles(g.x, g.y, g.value >= 5 ? "#ffd54a" : "#7ee0ff", 5);
+        addParticles(g.x, g.z, g.value >= 5 ? "#ffd54a" : "#7ee0ff", 5);
       }
     }
   }
-  function drawGems() {
-    const t = performance.now() / 300;
-    for (const g of gems) {
-      const s = worldToScreen(g.x, g.y);
-      if (s.x < -30 || s.x > W + 30 || s.y < -30 || s.y > H + 30) continue;
-      ctx.save();
-      ctx.translate(s.x, s.y);
-      ctx.rotate(Math.PI / 4);
-      const glow = 0.6 + 0.4 * Math.sin(t + g.x);
-      ctx.fillStyle = g.value >= 5 ? "#ffd54a" : "#7ee0ff";
-      ctx.shadowColor = ctx.fillStyle;
-      ctx.shadowBlur = 8 * glow;
-      ctx.fillRect(-g.r, -g.r, g.r * 2, g.r * 2);
-      ctx.restore();
-    }
+  function resetGems() {
+    for (const g of gems) scene.remove(g.mesh);
+    gems.length = 0;
   }
 
   // ---------------------------------------------------------------------
@@ -695,11 +976,7 @@
     levelupOverlay.classList.remove("hidden");
   }
   // Guards against a rapid double-click (or double keypress) silently
-  // applying two picks in one gesture: when multiple level-ups are queued,
-  // picking one re-renders a fresh card set at the same screen position, so
-  // a second click that lands microseconds later would otherwise land on
-  // (and apply) the new card underneath it. A short debounce blocks that
-  // without getting in the way of deliberate, separately-read picks.
+  // applying two picks in one gesture (see 2D game for full rationale).
   let lastPickAt = -Infinity;
   const PICK_DEBOUNCE_MS = 300;
   function pickCard(idx) {
@@ -759,19 +1036,25 @@
   }
 
   // ---------------------------------------------------------------------
-  // Joystick draw
+  // Joystick draw (DOM overlay — the canvas is now a WebGL surface)
   // ---------------------------------------------------------------------
   function drawJoystick() {
-    const rect = canvas.getBoundingClientRect();
+    if (!joyBaseEl || !joyStickEl) return;
+    const rect = wrap.getBoundingClientRect();
+    if (!joystick.active) {
+      joyBaseEl.style.display = "none";
+      joyStickEl.style.display = "none";
+      return;
+    }
     const bx = joystick.baseX - rect.left, by = joystick.baseY - rect.top;
     const cx = joystick.curX - rect.left, cy = joystick.curY - rect.top;
-    ctx.save();
-    ctx.globalAlpha = 0.5;
-    ctx.strokeStyle = "#ffd54a"; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(bx, by, JOY_R, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = "rgba(255,213,74,0.35)";
-    ctx.beginPath(); ctx.arc(cx, cy, 22, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
+    joyBaseEl.style.display = "block";
+    joyStickEl.style.display = "block";
+    joyBaseEl.style.left = (bx - JOY_R) + "px";
+    joyBaseEl.style.top = (by - JOY_R) + "px";
+    joyBaseEl.style.width = joyBaseEl.style.height = (JOY_R * 2) + "px";
+    joyStickEl.style.left = (cx - 22) + "px";
+    joyStickEl.style.top = (cy - 22) + "px";
   }
 
   // ---------------------------------------------------------------------
@@ -796,21 +1079,54 @@
   function getBest() { try { return +localStorage.getItem("markus_surv_best") || 0; } catch (e) { return 0; } }
   function setBest(v) { try { localStorage.setItem("markus_surv_best", v); } catch (e) { } }
 
+  // Clears fxRoot (weapon visual effects) between runs: disposes every
+  // child's geometry + material unless flagged `.shared = true` (weapons
+  // that keep one reusable template geometry/material across instances —
+  // see js/weapons.js) so restarting never leaks GPU resources.
+  function clearFxRoot() {
+    for (let i = fxRoot.children.length - 1; i >= 0; i--) {
+      const obj = fxRoot.children[i];
+      obj.traverse((n) => {
+        if (n.geometry && !n.geometry.shared) n.geometry.dispose();
+        if (n.material && !n.material.shared) {
+          if (Array.isArray(n.material)) n.material.forEach((m) => m.dispose());
+          else n.material.dispose();
+        }
+      });
+      fxRoot.remove(obj);
+    }
+  }
+
   function resetGame() {
-    player.x = 0; player.y = 0;
-    player.stats.speed = 220; player.stats.maxHp = 130; player.stats.regen = 0; player.stats.pickupRadius = 90;
+    player.x = 0; player.z = 0;
+    player.stats.speed = MG.px(220); player.stats.maxHp = 130; player.stats.regen = 0; player.stats.pickupRadius = MG.px(90);
     player.hp = player.stats.maxHp;
-    player.invuln = 0; player.facing.x = 1; player.facing.y = 0; player.bob = 0;
-    enemies.length = 0; gems.length = 0; particles.length = 0; damageNumbers.length = 0;
+    player.invuln = 0; player.facing.x = 1; player.facing.z = 0; player.bob = 0;
+    playerYaw = Math.atan2(player.facing.x, player.facing.z);
+
+    for (const e of enemies) disposeEnemy(e);
+    enemies.length = 0;
+    resetGems();
+    resetParticles();
+    resetDamageNumbers();
+
+    for (const w of MG.weapons.owned) { if (typeof w.dispose === "function") w.dispose(MG); }
+    clearFxRoot();
+
     level = 1; xp = 0; xpToNext = xpNeeded(1); levelUpQueue = 0;
     killCount = 0; gameTime = 0; spawnTimer = 1;
-    camera.x = 0; camera.y = 0;
     joystick.active = false;
+    lastScatterCX = null; lastScatterCZ = null;
+    viewRadiusDirty = true;
 
     MG.weapons.owned.length = 0;
     const startDef = MG.weapons.registry.find((w) => w.id === "klassisch");
     if (startDef) MG.weapons.owned.push(startDef.create(MG));
     lastWeaponSig = "";
+
+    updateCamera(0, true);
+    updateGround();
+    refreshScatter();
     updateHUD();
   }
 
@@ -870,10 +1186,8 @@
 
     updatePlayer(dt);
     handleContactDamage();
-    // Defensive net: contact damage is currently the only way HP drops, and
-    // it already calls gameOver() itself. This guard just makes sure the
-    // state machine can never get stuck "playing" at 0 HP if a future
-    // damage source (regen underflow, a new hazard, etc.) skips that path.
+    // Defensive net: same as 2D — contact damage already calls gameOver(),
+    // this just guarantees the state machine can't get stuck at 0 HP.
     if (state === "playing" && player.hp <= 0) { player.hp = 0; gameOver(); return; }
 
     spawnTimer -= dt;
@@ -889,19 +1203,16 @@
     updateParticles(dt);
     updateDamageNumbers(dt);
 
-    camera.x = player.x; camera.y = player.y;
+    updateCamera(dt, false);
+    updateGround();
+    refreshScatter();
+    if (viewRadiusDirty) computeFootprint();
     updateHUD();
   }
 
   function render() {
-    drawBackground();
-    drawGems();
-    for (const e of enemies) drawEnemy(e);
-    for (const w of MG.weapons.owned) w.draw(ctx, MG);
-    drawPlayer();
-    drawParticles();
-    drawDamageNumbers();
-    if (joystick.active) drawJoystick();
+    drawJoystick();
+    renderer.render(scene, camera);
   }
 
   function frame(t) {
@@ -913,6 +1224,12 @@
     render();
     requestAnimationFrame(frame);
   }
+
+  initDamageNumberPool();
+  resize();
+  updateCamera(0, true);
+  updateGround();
+  refreshScatter();
   requestAnimationFrame(frame);
 
   // ---------------------------------------------------------------------
@@ -925,5 +1242,6 @@
     weapons: MG.weapons,
     gainXP(n) { addXP(n); },
     get time() { return gameTime; },
+    renderer,
   };
 })();

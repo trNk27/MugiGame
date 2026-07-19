@@ -19,7 +19,7 @@
     position: relative;
     width: 100vw; height: 100vh;
   }
-  canvas { display: block; width: 100%; height: 100%; background: #0b0f1a; }
+  canvas { display: block; width: 100%; height: 100%; background: #0b0f1a; outline: none; }
 
   /* ---------- HUD ---------- */
   #hud {
@@ -144,6 +144,17 @@
   .card .icon { font-size: 40px; }
   .card .name { color: #ffd54a; font-weight: bold; margin: 10px 0 6px; font-size: 15px; }
   .card .desc { font-size: 12.5px; opacity: 0.85; line-height: 1.4; }
+
+  /* ---------- Touch joystick (DOM overlay; canvas is a WebGL surface) ---------- */
+  #joyBase, #joyStick {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    border-radius: 50%;
+    z-index: 4;
+  }
+  #joyBase { border: 3px solid rgba(255,213,74,0.5); }
+  #joyStick { width: 44px; height: 44px; background: rgba(255,213,74,0.35); }
 </style>
 </head>
 <body>
@@ -164,7 +175,7 @@
   <!-- Start screen -->
   <div id="startOverlay" class="overlay">
     <h1>Peitsch den Markus: Survivors</h1>
-    <p>WASD / Pfeiltasten bzw. Finger ziehen zum Bewegen. Waffen feuern automatisch.</p>
+    <p>WASD / Pfeiltasten bzw. Finger ziehen zum Bewegen durch die 3D-Welt. Waffen feuern automatisch.</p>
     <p>XP sammeln, aufleveln, die Markus-Horde überleben!</p>
     <button class="btn" id="startBtn">Los geht's!</button>
     <div class="hint">Esc = Pause</div>
@@ -190,8 +201,13 @@
     <h2>Pause</h2>
     <p>Beliebige Taste zum Fortsetzen</p>
   </div>
+
+  <!-- Touch joystick overlay -->
+  <div id="joyBase"></div>
+  <div id="joyStick"></div>
 </div>
 
+<script src="vendor/three.min.js"></script>
 <script src="js/core.js"></script>
 <script src="js/weapons.js"></script>
 </body>
