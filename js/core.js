@@ -53,7 +53,7 @@
   const scene = new THREE.Scene();
   MG.scene = scene;
   scene.background = new THREE.Color(0x05060a);
-  scene.fog = new THREE.Fog(0x0b0f1a, 14, 46);
+  scene.fog = new THREE.Fog(0x0b0f1a, 16, 48);
 
   // fxRoot: weapons add their own three.js visual-effect objects here.
   // Cleared (all children removed + geometries/materials disposed, except
@@ -104,12 +104,25 @@
     const g = cnv.getContext("2d");
     g.fillStyle = "#141b2e";
     g.fillRect(0, 0, 256, 256);
-    g.strokeStyle = "rgba(255,255,255,0.06)";
+    // soft deterministic color mottling (darker/lighter blotches) so the
+    // ground reads less flat; kept low-alpha so it never competes with
+    // gameplay readability (enemies/particles/gems stay high-contrast).
+    let seed = 3;
+    function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+    for (let i = 0; i < 7; i++) {
+      const x = rnd() * 256, y = rnd() * 256, r = 26 + rnd() * 46;
+      const dark = rnd() > 0.5;
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, dark ? "rgba(6,9,18,0.32)" : "rgba(60,72,102,0.15)");
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      g.fillStyle = grad;
+      g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+    }
+    g.strokeStyle = "rgba(255,255,255,0.05)";
     g.lineWidth = 2;
     g.strokeRect(1, 1, 254, 254);
     // sparse deterministic dots
-    let seed = 7;
-    function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+    seed = 7;
     g.fillStyle = "rgba(255,255,255,0.07)";
     for (let i = 0; i < 10; i++) {
       const x = rnd() * 256, y = rnd() * 256, s = 1.2 + rnd() * 1.6;
@@ -135,37 +148,255 @@
   }
 
   // ---------------------------------------------------------------------
-  // Scatter decoration (rocks/trees) — deterministic grid hash, purely
-  // cosmetic (no collision). Repositioned via two InstancedMeshes whenever
-  // the player crosses into a new scatter cell.
+  // Scatter decoration (grass / rocks / trees / structures) — deterministic
+  // grid hash, purely cosmetic (no collision, no gameplay interaction).
+  // Everything is repositioned whenever the player crosses into a new
+  // coarse scatter cell (see refreshScatter's early-return below), so the
+  // rebuild work inside that function does NOT run every frame — it's safe
+  // for it to allocate (matches the original rock/tree code's style, which
+  // already allocated a fresh Vector3 per instance in this same path).
   // ---------------------------------------------------------------------
   function hash2(a, b) {
     let x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
     return x - Math.floor(x);
   }
-  const SCATTER_CELL = 5.5;
-  const SCATTER_RADIUS_CELLS = 7;
-  const MAX_ROCKS = 40, MAX_TREES = 24;
-  const rockGeo = new THREE.BoxGeometry(1, 1, 1);
-  const treeGeo = new THREE.ConeGeometry(0.45, 1.3, 6);
-  const rockMat = new THREE.MeshStandardMaterial({ color: 0x2a3350, roughness: 0.9 });
-  const treeMat = new THREE.MeshStandardMaterial({ color: 0x342a55, roughness: 0.85 });
-  const rockMesh = new THREE.InstancedMesh(rockGeo, rockMat, MAX_ROCKS);
-  const treeMesh = new THREE.InstancedMesh(treeGeo, treeMat, MAX_TREES);
-  rockMesh.count = 0; treeMesh.count = 0;
-  scene.add(rockMesh, treeMesh);
+  // small per-cell PRNG helper for structure part variation (salt just
+  // shifts which "channel" of the hash we read for a given cell)
+  function rh(gx, gz, salt) { return hash2(gx + salt * 17.3, gz - salt * 11.9); }
+
+  // Merge several primitive geometries (each already placed by its own
+  // local matrix) into one non-indexed BufferGeometry with baked per-part
+  // vertex colors, so a whole multi-primitive shape (a tree canopy, a
+  // ruin, a hut...) costs a single draw call instead of one per part.
+  function mergeParts(parts) {
+    let total = 0;
+    const chunks = parts.map((p) => {
+      const g = p.geo.index ? p.geo.toNonIndexed() : p.geo.clone();
+      g.applyMatrix4(p.matrix);
+      total += g.attributes.position.count;
+      return g;
+    });
+    const positions = new Float32Array(total * 3);
+    const normals = new Float32Array(total * 3);
+    const colors = new Float32Array(total * 3);
+    let offset = 0;
+    chunks.forEach((g, i) => {
+      const cnt = g.attributes.position.count;
+      positions.set(g.attributes.position.array, offset * 3);
+      normals.set(g.attributes.normal.array, offset * 3);
+      const c = parts[i].color;
+      for (let v = 0; v < cnt; v++) {
+        colors[(offset + v) * 3] = c.r;
+        colors[(offset + v) * 3 + 1] = c.g;
+        colors[(offset + v) * 3 + 2] = c.b;
+      }
+      offset += cnt;
+      g.dispose();
+    });
+    const merged = new THREE.BufferGeometry();
+    merged.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    merged.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    merged.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    return merged;
+  }
+  function partMatrix(x, y, z, rx, ry, rz, sx, sy, sz) {
+    return new THREE.Matrix4().compose(
+      new THREE.Vector3(x, y, z),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz)),
+      new THREE.Vector3(sx, sy, sz)
+    );
+  }
+  const WHITE = new THREE.Color(1, 1, 1);
+
+  // Shared "unit" primitives (centered, radius/size 1) reused as building
+  // blocks for trees and structures via mergeParts/partMatrix above.
+  const boxUnit = new THREE.BoxGeometry(1, 1, 1);
+  const coneUnit = new THREE.ConeGeometry(1, 1, 7);
+  const pyramidUnit = new THREE.ConeGeometry(1, 1, 4);
+  const icoUnit = new THREE.IcosahedronGeometry(1, 0);
+  const taperUnit = new THREE.CylinderGeometry(0.65, 1, 1, 7);
+
   const _m4 = new THREE.Matrix4();
   const _quat = new THREE.Quaternion();
   const _scaleV = new THREE.Vector3(1, 1, 1);
+  const _axisY = new THREE.Vector3(0, 1, 0);
   let lastScatterCX = null, lastScatterCZ = null;
+
+  // --- rocks (unchanged shape, box InstancedMesh) ---
+  const SCATTER_CELL = 5.5;
+  const SCATTER_RADIUS_CELLS = 7;
+  const MAX_ROCKS = 40;
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x2a3350, roughness: 0.9 });
+  const rockMesh = new THREE.InstancedMesh(boxUnit, rockMat, MAX_ROCKS);
+  rockMesh.count = 0;
+  scene.add(rockMesh);
+
+  // --- trees: one shared trunk InstancedMesh + one InstancedMesh per
+  // canopy variant (fir / deciduous / dead-branch), each canopy variant's
+  // geometry itself a merged multi-primitive template built once below. ---
+  const MAX_TRUNK = 54, MAX_FIR = 20, MAX_DECID = 20, MAX_DEAD = 16;
+  const trunkGeo = new THREE.CylinderGeometry(0.07, 0.1, 1, 6);
+  trunkGeo.translate(0, 0.5, 0); // pivot at base
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3628, roughness: 0.9 });
+  const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, MAX_TRUNK);
+  const canopyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 });
+  const firCanopyGeo = mergeParts([
+    { geo: coneUnit, matrix: partMatrix(0, 0.45, 0, 0, 0, 0, 0.5, 0.9, 0.5), color: WHITE },
+    { geo: coneUnit, matrix: partMatrix(0, 0.85, 0, 0, 0, 0, 0.35, 0.65, 0.35), color: WHITE },
+  ]);
+  const decidCanopyGeo = mergeParts([
+    { geo: icoUnit, matrix: partMatrix(0, 0.5, 0, 0, 0, 0, 0.55, 0.5, 0.55), color: WHITE },
+    { geo: icoUnit, matrix: partMatrix(0.2, 0.65, 0.05, 0, 0, 0, 0.35, 0.32, 0.35), color: WHITE },
+  ]);
+  const deadCanopyGeo = mergeParts([
+    { geo: boxUnit, matrix: partMatrix(0.15, 0.5, 0, 0, 0, 0.9, 0.5, 0.05, 0.05), color: WHITE },
+    { geo: boxUnit, matrix: partMatrix(-0.15, 0.35, 0.1, 0, 0, -0.8, 0.4, 0.05, 0.05), color: WHITE },
+    { geo: boxUnit, matrix: partMatrix(0, 0.7, -0.1, 0.6, 0, 0.2, 0.3, 0.05, 0.05), color: WHITE },
+  ]);
+  const firMesh = new THREE.InstancedMesh(firCanopyGeo, canopyMat, MAX_FIR);
+  const decidMesh = new THREE.InstancedMesh(decidCanopyGeo, canopyMat, MAX_DECID);
+  const deadMesh = new THREE.InstancedMesh(deadCanopyGeo, canopyMat, MAX_DEAD);
+  trunkMesh.count = 0; firMesh.count = 0; decidMesh.count = 0; deadMesh.count = 0;
+  scene.add(trunkMesh, firMesh, decidMesh, deadMesh);
+
+  // --- grass: one InstancedMesh of crossed-quad tufts ---
+  const MAX_GRASS = 560;
+  const grassGeo = mergeParts([
+    { geo: (() => { const p = new THREE.PlaneGeometry(0.55, 1); p.translate(0, 0.5, 0); return p; })(), matrix: new THREE.Matrix4(), color: WHITE },
+    { geo: (() => { const p = new THREE.PlaneGeometry(0.55, 1); p.translate(0, 0.5, 0); p.rotateY(Math.PI / 2); return p; })(), matrix: new THREE.Matrix4(), color: WHITE },
+  ]);
+  const grassMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, side: THREE.DoubleSide });
+  const grassMesh = new THREE.InstancedMesh(grassGeo, grassMat, MAX_GRASS);
+  grassMesh.count = 0;
+  scene.add(grassMesh);
+  // 2-3 "hero" tufts nearest the player get a cheap per-frame lean each
+  // frame; every other instance is placed once and stays fully static.
+  const HERO_GRASS_N = 3;
+  let heroGrass = [];
+  const _heroEuler = new THREE.Euler();
+  const _heroPos = new THREE.Vector3();
+  function updateGrassSway(t) {
+    if (!heroGrass.length) return;
+    for (let i = 0; i < heroGrass.length; i++) {
+      const hg = heroGrass[i];
+      const wob = Math.sin(t * 2.2 + hg.idx) * 0.18;
+      _heroEuler.set(hg.lean, hg.rotY + wob * 0.3, hg.lean * 0.4 + wob);
+      _quat.setFromEuler(_heroEuler);
+      _scaleV.set(hg.s, hg.s, hg.s);
+      _heroPos.set(hg.x, 0, hg.z);
+      _m4.compose(_heroPos, _quat, _scaleV);
+      grassMesh.setMatrixAt(hg.idx, _m4);
+    }
+    grassMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  // --- structures: a small pool of Groups (rare, ~1 per 2-3 screens),
+  // each a single merged-geometry "body" mesh (+ an optional emissive
+  // window accent for huts). Deterministic per cell like everything else,
+  // reused by key so the same world cell always yields the same building
+  // without a geometry rebuild once it's already resident in the pool. ---
+  const structMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88 });
+  function buildRuins(gx, gz) {
+    const stone = new THREE.Color(0x4b5468);
+    const parts = [];
+    const n = 6;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + rh(gx, gz, i) * 0.6;
+      const rad = 1.6 + rh(gx, gz, i + 50) * 0.3;
+      const px = Math.cos(a) * rad, pz = Math.sin(a) * rad;
+      const fallen = rh(gx, gz, i + 90) > 0.8;
+      const h = 0.9 + rh(gx, gz, i + 10) * 0.9;
+      const tilt = (rh(gx, gz, i + 20) - 0.5) * 0.35;
+      const c = stone.clone().offsetHSL(0, 0, (rh(gx, gz, i + 30) - 0.5) * 0.08);
+      if (fallen) {
+        parts.push({ geo: boxUnit, matrix: partMatrix(px, 0.16, pz, 0.05, a, Math.PI / 2 + tilt, 0.32, 0.32, h * 0.8), color: c });
+      } else {
+        parts.push({ geo: boxUnit, matrix: partMatrix(px, h / 2, pz, tilt, a * 0.3, tilt * 0.6, 0.34, h, 0.34), color: c });
+      }
+    }
+    return mergeParts(parts);
+  }
+  function buildHut(gx, gz) {
+    const wall = new THREE.Color(0x2c2438);
+    const roof = new THREE.Color(0x1c2436);
+    const door = new THREE.Color(0x171225);
+    return mergeParts([
+      { geo: boxUnit, matrix: partMatrix(0, 0.55, 0, 0, 0, 0, 1.6, 1.1, 1.4), color: wall },
+      { geo: pyramidUnit, matrix: partMatrix(0, 1.35, 0, 0, Math.PI / 4, 0, 1.35, 0.9, 1.35), color: roof },
+      { geo: boxUnit, matrix: partMatrix(-0.35, 0.35, 0.71, 0, 0, 0, 0.4, 0.7, 0.06), color: door },
+    ]);
+  }
+  function buildTower(gx, gz) {
+    const stone = new THREE.Color(0x454f63);
+    const parts = [];
+    let y = 0, ox = 0, oz = 0;
+    for (let i = 0; i < 3; i++) {
+      const h = 1.05 - i * 0.25;
+      const rad = 0.62 - i * 0.14;
+      const tiltX = (rh(gx, gz, i + 5) - 0.5) * 0.1 * i;
+      const tiltZ = (rh(gx, gz, i + 15) - 0.5) * 0.1 * i;
+      ox += (rh(gx, gz, i + 25) - 0.5) * 0.18;
+      oz += (rh(gx, gz, i + 35) - 0.5) * 0.18;
+      const c = stone.clone().offsetHSL(0, 0, (rh(gx, gz, i + 45) - 0.5) * 0.06);
+      parts.push({ geo: taperUnit, matrix: partMatrix(ox, y + h / 2, oz, tiltX, 0, tiltZ, rad, h, rad), color: c });
+      y += h * 0.95;
+    }
+    for (let i = 0; i < 2; i++) {
+      const a = rh(gx, gz, i + 60) * Math.PI * 2;
+      const rr = 0.8 + rh(gx, gz, i + 70) * 0.4;
+      parts.push({ geo: boxUnit, matrix: partMatrix(Math.cos(a) * rr, 0.15, Math.sin(a) * rr, rh(gx, gz, i + 80), rh(gx, gz, i + 81) * Math.PI, rh(gx, gz, i + 82), 0.4, 0.3, 0.4), color: stone });
+    }
+    return mergeParts(parts);
+  }
+  function buildFence(gx, gz) {
+    const wood = new THREE.Color(0x5a4530);
+    const parts = [];
+    const n = 5, spacing = 0.85, gapAt = 2;
+    for (let i = 0; i < n; i++) {
+      if (i === gapAt) continue;
+      const px = (i - (n - 1) / 2) * spacing;
+      const wob = (rh(gx, gz, i + 5) - 0.5) * 0.15;
+      const c = wood.clone().offsetHSL(0, 0, (rh(gx, gz, i + 15) - 0.5) * 0.08);
+      parts.push({ geo: boxUnit, matrix: partMatrix(px, 0.4, 0, wob * 0.3, 0, wob, 0.1, 0.8, 0.1), color: c });
+    }
+    parts.push({ geo: boxUnit, matrix: partMatrix(-spacing, 0.55, 0, 0, 0, 0, spacing * 2.1, 0.08, 0.06), color: wood });
+    parts.push({ geo: boxUnit, matrix: partMatrix(spacing, 0.55, 0, 0, 0, 0, spacing * 2.1, 0.08, 0.06), color: wood });
+    return mergeParts(parts);
+  }
+  const STRUCT_BUILDERS = [buildRuins, buildHut, buildTower, buildFence];
+  const MAX_STRUCTURES = 6;
+  const windowGeo = new THREE.PlaneGeometry(0.5, 0.4);
+  const windowMat = new THREE.MeshStandardMaterial({ color: 0xffd54a, emissive: 0xffb300, emissiveIntensity: 1.4, roughness: 0.5, side: THREE.DoubleSide });
+  const structPool = [];
+  for (let i = 0; i < MAX_STRUCTURES; i++) {
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BufferGeometry(), structMat);
+    const accent = new THREE.Mesh(windowGeo, windowMat);
+    accent.visible = false;
+    group.add(body, accent);
+    group.visible = false;
+    scene.add(group);
+    structPool.push({ key: null, type: -1, group, body, accent, d: Infinity });
+  }
+  const MAX_STRUCT_LIGHTS = 2;
+  const structLights = [];
+  for (let i = 0; i < MAX_STRUCT_LIGHTS; i++) {
+    const pl = new THREE.PointLight(0xffcf70, 0, 6, 2);
+    scene.add(pl);
+    structLights.push(pl);
+  }
+  const STRUCT_CELL = 20;
+  const STRUCT_RADIUS_CELLS = 3;
 
   function refreshScatter() {
     const cx = Math.floor(player.x / SCATTER_CELL);
     const cz = Math.floor(player.z / SCATTER_CELL);
     if (cx === lastScatterCX && cz === lastScatterCZ) return;
     lastScatterCX = cx; lastScatterCZ = cz;
-    let rockN = 0, treeN = 0;
-    for (let dx = -SCATTER_RADIUS_CELLS; dx <= SCATTER_RADIUS_CELLS && (rockN < MAX_ROCKS || treeN < MAX_TREES); dx++) {
+
+    // ---- rocks + trees (fir / deciduous / dead variants) ----
+    let rockN = 0, trunkN = 0, firN = 0, decidN = 0, deadN = 0;
+    for (let dx = -SCATTER_RADIUS_CELLS; dx <= SCATTER_RADIUS_CELLS; dx++) {
       for (let dz = -SCATTER_RADIUS_CELLS; dz <= SCATTER_RADIUS_CELLS; dz++) {
         const gx = cx + dx, gz = cz + dz;
         const h = hash2(gx, gz);
@@ -178,26 +409,146 @@
         const distToPlayer = Math.hypot(wx - player.x, wz - player.z);
         if (distToPlayer < 2.5) continue; // keep a small deadzone clear right around the player
         if (isTree) {
-          if (treeN >= MAX_TREES) continue;
-          const s = 0.6 + hash2(gx, gz + 55) * 0.55;
-          const yMul = 0.9 + hash2(gx + 1, gz) * 0.3;
-          _scaleV.set(s, s * yMul, s);
-          _quat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), hash2(gx, gz + 200) * Math.PI * 2);
-          _m4.compose(new THREE.Vector3(wx, (1.3 * _scaleV.y) / 2, wz), _quat, _scaleV);
-          treeMesh.setMatrixAt(treeN++, _m4);
+          const vsel = hash2(gx + 200, gz + 200);
+          const variant = vsel < 0.4 ? 0 : vsel < 0.75 ? 1 : 2; // fir / deciduous / dead
+          const s = 0.85 + hash2(gx, gz + 55) * 0.6;
+          const rot = hash2(gx, gz + 300) * Math.PI * 2;
+          _quat.setFromAxisAngle(_axisY, rot);
+          const trunkH = variant === 2 ? 1.9 * s : 1.15 * s;
+          const trunkR = variant === 2 ? 0.55 : 1;
+          if (trunkN < MAX_TRUNK) {
+            _scaleV.set(0.9 * trunkR, trunkH, 0.9 * trunkR);
+            _m4.compose(new THREE.Vector3(wx, 0, wz), _quat, _scaleV);
+            trunkMesh.setMatrixAt(trunkN++, _m4);
+          }
+          const canopyColor = new THREE.Color().setHSL(
+            0.42 + hash2(gx + 9, gz + 9) * 0.18,
+            0.28 + hash2(gx + 8, gz + 8) * 0.15,
+            0.16 + hash2(gx + 7, gz + 7) * 0.08
+          );
+          const canH = 1.1 * s;
+          _scaleV.set(canH, canH, canH);
+          _m4.compose(new THREE.Vector3(wx, trunkH * 0.92, wz), _quat, _scaleV);
+          if (variant === 0 && firN < MAX_FIR) { firMesh.setMatrixAt(firN, _m4); firMesh.setColorAt(firN, canopyColor); firN++; }
+          else if (variant === 1 && decidN < MAX_DECID) { decidMesh.setMatrixAt(decidN, _m4); decidMesh.setColorAt(decidN, canopyColor); decidN++; }
+          else if (variant === 2 && deadN < MAX_DEAD) { deadMesh.setMatrixAt(deadN, _m4); deadMesh.setColorAt(deadN, canopyColor.offsetHSL(0, 0, -0.05)); deadN++; }
         } else {
           if (rockN >= MAX_ROCKS) continue;
           const s = 0.35 + hash2(gx + 2, gz) * 0.55;
           _scaleV.set(s, s, s);
-          _quat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), hash2(gx, gz + 400) * Math.PI * 2);
+          _quat.setFromAxisAngle(_axisY, hash2(gx, gz + 400) * Math.PI * 2);
           _m4.compose(new THREE.Vector3(wx, s / 2, wz), _quat, _scaleV);
           rockMesh.setMatrixAt(rockN++, _m4);
         }
       }
     }
-    rockMesh.count = rockN; treeMesh.count = treeN;
+    rockMesh.count = rockN;
+    trunkMesh.count = trunkN;
+    firMesh.count = firN; decidMesh.count = decidN; deadMesh.count = deadN;
     rockMesh.instanceMatrix.needsUpdate = true;
-    treeMesh.instanceMatrix.needsUpdate = true;
+    trunkMesh.instanceMatrix.needsUpdate = true;
+    firMesh.instanceMatrix.needsUpdate = true;
+    decidMesh.instanceMatrix.needsUpdate = true;
+    deadMesh.instanceMatrix.needsUpdate = true;
+    if (firMesh.instanceColor) firMesh.instanceColor.needsUpdate = true;
+    if (decidMesh.instanceColor) decidMesh.instanceColor.needsUpdate = true;
+    if (deadMesh.instanceColor) deadMesh.instanceColor.needsUpdate = true;
+
+    // ---- grass ----
+    const GRASS_CELL = 1.25;
+    const GRASS_RADIUS_CELLS = 12;
+    const gcx = Math.floor(player.x / GRASS_CELL);
+    const gcz = Math.floor(player.z / GRASS_CELL);
+    let grassN = 0;
+    heroGrass = [];
+    for (let dx = -GRASS_RADIUS_CELLS; dx <= GRASS_RADIUS_CELLS && grassN < MAX_GRASS; dx++) {
+      for (let dz = -GRASS_RADIUS_CELLS; dz <= GRASS_RADIUS_CELLS && grassN < MAX_GRASS; dz++) {
+        const gx = gcx + dx, gz = gcz + dz;
+        if (hash2(gx + 1000, gz + 1000) > 0.8) continue;
+        const jx = (hash2(gx + 1300, gz) - 0.5) * GRASS_CELL * 0.8;
+        const jz = (hash2(gx, gz + 1300) - 0.5) * GRASS_CELL * 0.8;
+        const wx = (gx + 0.5) * GRASS_CELL + jx;
+        const wz = (gz + 0.5) * GRASS_CELL + jz;
+        const d = Math.hypot(wx - player.x, wz - player.z);
+        if (d < 1.6) continue; // deadzone right under the player
+        const s = 0.15 + hash2(gx + 1400, gz) * 0.25;
+        const rotY = hash2(gx, gz + 1500) * Math.PI * 2;
+        const lean = (hash2(gx + 1600, gz) - 0.5) * 0.5;
+        _quat.setFromEuler(new THREE.Euler(lean, rotY, lean * 0.4));
+        _scaleV.set(s, s, s);
+        _m4.compose(new THREE.Vector3(wx, 0, wz), _quat, _scaleV);
+        grassMesh.setMatrixAt(grassN, _m4);
+        const t = hash2(gx + 1700, gz);
+        const col = new THREE.Color(0x2e4a3f).lerp(new THREE.Color(0x3a5a45), t);
+        grassMesh.setColorAt(grassN, col);
+        if (d < 9 && heroGrass.length < HERO_GRASS_N) heroGrass.push({ idx: grassN, x: wx, z: wz, rotY, lean, s });
+        grassN++;
+      }
+    }
+    grassMesh.count = grassN;
+    grassMesh.instanceMatrix.needsUpdate = true;
+    if (grassMesh.instanceColor) grassMesh.instanceColor.needsUpdate = true;
+
+    // ---- structures (sparse, pooled Groups, deterministic per cell) ----
+    const scx = Math.floor(player.x / STRUCT_CELL);
+    const scz = Math.floor(player.z / STRUCT_CELL);
+    const candidates = [];
+    outer:
+    for (let dx = -STRUCT_RADIUS_CELLS; dx <= STRUCT_RADIUS_CELLS; dx++) {
+      for (let dz = -STRUCT_RADIUS_CELLS; dz <= STRUCT_RADIUS_CELLS; dz++) {
+        const gx = scx + dx, gz = scz + dz;
+        if (hash2(gx + 9000, gz + 9000) > 0.16) continue;
+        const jx = (hash2(gx + 9100, gz) - 0.5) * STRUCT_CELL * 0.5;
+        const jz = (hash2(gx, gz + 9100) - 0.5) * STRUCT_CELL * 0.5;
+        const wx = (gx + 0.5) * STRUCT_CELL + jx;
+        const wz = (gz + 0.5) * STRUCT_CELL + jz;
+        const d = Math.hypot(wx - player.x, wz - player.z);
+        if (d < 6) continue; // generous deadzone so nothing looms over the player
+        const type = Math.min(3, Math.floor(hash2(gx + 9200, gz + 9200) * 4));
+        candidates.push({ key: gx + "," + gz, gx, gz, wx, wz, type, d });
+        if (candidates.length >= MAX_STRUCTURES) break outer;
+      }
+    }
+    const usedSlots = new Set();
+    for (const cand of candidates) {
+      let slotIdx = structPool.findIndex((s) => s.key === cand.key);
+      if (slotIdx === -1) slotIdx = structPool.findIndex((s, i) => !usedSlots.has(i) && s.key === null);
+      if (slotIdx === -1) {
+        for (let i = 0; i < structPool.length; i++) { if (!usedSlots.has(i)) { slotIdx = i; break; } }
+      }
+      if (slotIdx === -1) continue;
+      usedSlots.add(slotIdx);
+      const slot = structPool[slotIdx];
+      if (slot.key !== cand.key) {
+        slot.key = cand.key;
+        slot.type = cand.type;
+        slot.body.geometry.dispose();
+        slot.body.geometry = STRUCT_BUILDERS[cand.type](cand.gx, cand.gz);
+        slot.accent.visible = cand.type === 1;
+        if (cand.type === 1) slot.accent.position.set(0.35, 0.55, 0.72);
+      }
+      slot.group.position.set(cand.wx, 0, cand.wz);
+      slot.group.rotation.y = hash2(cand.gx + 9300, cand.gz + 9300) * Math.PI * 2;
+      slot.group.visible = true;
+      slot.d = cand.d;
+    }
+    for (let i = 0; i < structPool.length; i++) {
+      if (!usedSlots.has(i)) { structPool[i].group.visible = false; structPool[i].key = null; }
+    }
+    // At most MAX_STRUCT_LIGHTS real point lights alive at once, globally —
+    // assign them to the nearest active hut windows for an extra glow-pool
+    // on the ground; the window's own emissive material always reads even
+    // without a light.
+    const litCandidates = structPool.filter((s) => s.group.visible && s.type === 1).sort((a, b) => a.d - b.d);
+    for (let i = 0; i < structLights.length; i++) {
+      const s = litCandidates[i];
+      if (s) {
+        structLights[i].position.set(s.group.position.x + 0.35, 0.75, s.group.position.z + 0.72);
+        structLights[i].intensity = 0.9;
+      } else {
+        structLights[i].intensity = 0;
+      }
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1216,6 +1567,7 @@
     updateCamera(dt, false);
     updateGround();
     refreshScatter();
+    updateGrassSway(gameTime);
     if (viewRadiusDirty) computeFootprint();
     updateHUD();
   }
