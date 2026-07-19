@@ -1,9 +1,10 @@
-# Peitsch den Markus: Survivors 🪢
+# Peitsch den Markus: Survivors 3D 🪢
 
-Ein Survivors-like im Browser: Du steuerst einen Peitschenschwinger, der sich
-gegen eine ständig wachsende Horde von Markus-Köpfen zur Wehr setzen muss.
-Bewegen, überleben, XP sammeln, aufleveln, stärker werden – bis die Horde dich
-irgendwann doch einholt.
+Ein 3D-Survivors-like im Browser (Stil: Megabonk): Du steuerst einen
+Peitschenschwinger durch eine endlose Low-Poly-Welt und wehrst dich gegen eine
+ständig wachsende Horde von Markus-Köpfen. Bewegen, überleben, XP sammeln,
+aufleveln, Truhen plündern, Brezeln futtern – bis die Horde dich irgendwann
+doch einholt.
 
 ## Spielen
 
@@ -19,7 +20,7 @@ python3 -m http.server 8000
 
 ## Steuerung
 
-- **WASD / Pfeiltasten**: Bewegen. Waffen feuern automatisch in Bewegungsrichtung.
+- **WASD / Pfeiltasten**: Bewegen. Waffen feuern automatisch in Blickrichtung.
 - **Finger ziehen** (Touch): Virtueller Joystick – an beliebiger Stelle auf dem
   Spielfeld antippen und ziehen.
 - **Esc**: Pause (jede Taste setzt fort).
@@ -27,8 +28,8 @@ python3 -m http.server 8000
 
 ## Ablauf
 
-- Feinde ("Markus"-Köpfe) spawnen am Bildschirmrand und rücken auf dich zu;
-  je länger die Runde läuft, desto mehr und desto härter wird es.
+- Feinde ("Markus"-Köpfe) tauchen am Rand des Sichtfelds auf und rücken auf
+  dich zu; je länger die Runde läuft, desto mehr und desto härter wird es.
 - Getötete Feinde lassen XP-Kristalle fallen. Ist die XP-Leiste voll, gibt's
   einen Level-Up mit 3 zufälligen Karten zur Auswahl.
 - Berührt dich ein Feind, verlierst du HP (kurze Unverwundbarkeit nach jedem
@@ -58,26 +59,56 @@ python3 -m http.server 8000
 Reicht der Kartenpool nicht (z. B. wenn schon alles maximiert ist), springt
 als Notlösung die 🥨 **Brezel**-Karte ein: +30 HP, sofort.
 
+## Truhen 🧰
+
+Alle 45–70 Sekunden erscheint irgendwo in deiner Nähe eine Truhe (maximal 2
+gleichzeitig). Lauf einfach hinein, um sie zu öffnen:
+
+- **60 %**: Sofortiges Upgrade einer zufälligen, noch nicht maximierten
+  Waffe / eines passiven Items (wird kurz eingeblendet).
+- **25 %**: Ein Essens-Item springt heraus.
+- **15 %**: XP-Jackpot – 5 goldene Kristalle bersten heraus.
+
+Gibt es nichts mehr zu verbessern, gibt's automatisch den Jackpot.
+
+## Essen 🥨
+
+Besiegte Markusse lassen mit 4 % Chance etwas Essbares fallen (maximal 5
+gleichzeitig, verschwindet nach 45 s). Essen wird **nicht** vom Magneten
+angezogen – du musst drüberlaufen:
+
+| Icon | Name | Effekt |
+|---|---|---|
+| 🥨 | Brezel | Heilt 30 HP. |
+| 🥩 | Schnitzel | Heilt 60 HP. |
+| 🍺 | Maß | 8 s Berserker: alle Waffen-Cooldowns ×0,6 (stapelt mit der Sanduhr). |
+| 🧀 | Käsebrot | +10 max. HP für diese Runde und heilt 20 HP. |
+
 ## Level- & Slot-Regeln
 
 - Maximal **4 Waffen** und **3 passive Items** gleichzeitig aktiv.
 - Jede Waffe/jedes Item lässt sich unabhängig aufleveln (Waffen bis Stufe 5,
   Passive bis Stufe 3); alle Werte pro Stufe stehen in eigenen Datentabellen
   in `js/weapons.js`.
-- Beim Level-Up bekommst du 3 zufällige Karten aus dem Pool aus: Upgrades für
+- Beim Level-Up bekommst du 3 zufällige Karten aus dem Pool: Upgrades für
   bereits besessene, noch nicht maximierte Waffen/Items, neue Waffen (solange
   Slots frei sind) und neue passive Items (solange Slots frei sind).
 
 ## Technik
 
-- Reines HTML5 Canvas 2D + JavaScript, keine externen Abhängigkeiten,
-  keine Build-Schritte.
-- `js/core.js` ist die Engine (Spieler, Gegner, Kamera, XP/Leveling, HUD,
-  State-Machine); `js/weapons.js` enthält alle Waffen und passiven Items nach
-  einem kleinen, dokumentierten Plugin-API. Beide teilen sich `window.MG`.
+- HTML5 + JavaScript + WebGL über **three.js r147** (UMD-Build, lokal
+  vendored unter `vendor/three.min.js`) – keine CDN-Abhängigkeiten, keine
+  Build-Schritte.
+- Das Gameplay läuft komplett auf der XZ-Bodenebene (Kamera folgt in der
+  dritten Person); alle Tuning-Werte stammen 1:1 aus der 2D-Version und
+  werden über eine einzige Konstante (40 px = 1 Welteinheit) umgerechnet.
+- `js/core.js`: Engine (Szene/Kamera, Spieler, Gegner-Billboards, XP/Leveling,
+  HUD, State-Machine). `js/weapons.js`: alle Waffen und Passiven über ein
+  kleines, dokumentiertes Plugin-API. `js/systems.js`: Truhen & Essen.
+  Alle teilen sich `window.MG`.
+- Boden ist eine prozedurale CanvasTexture; Markus-Gegner sind
+  chroma-gekeyte Billboard-Sprites; Deko (Felsen/Bäume) per InstancedMesh.
 - Sound-Effekte werden per WebAudio zur Laufzeit synthetisiert (keine
   Audiodateien).
-- Das Gegner-Sprite liegt unter `assets/markus.png` und wird beim Laden per
-  Chroma-Key freigestellt.
 - Debug-Hook für QA/Tests: `window.__game` (`gainXP(n)`, `player`, `enemies`,
-  `time`, …).
+  `time`, `renderer`, …).
