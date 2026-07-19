@@ -144,7 +144,13 @@
 
   function updateGround() {
     groundMesh.position.set(player.x, 0, player.z);
-    groundTex.offset.set(player.x / TILE_WORLD, player.z / TILE_WORLD);
+    // The plane is built with rotateX(-Math.PI/2), which maps the
+    // texture's V axis to world -Z (V increases as Z decreases). The U
+    // axis is untouched and maps directly to world X. So the V-axis
+    // offset needs a sign flip to keep the pattern fixed in world space
+    // as the player (and the re-centered plane) moves — without it the
+    // ground visibly scrolls backwards on the Z axis only.
+    groundTex.offset.set(player.x / TILE_WORLD, -player.z / TILE_WORLD);
   }
 
   // ---------------------------------------------------------------------
@@ -493,7 +499,6 @@
     const scx = Math.floor(player.x / STRUCT_CELL);
     const scz = Math.floor(player.z / STRUCT_CELL);
     const candidates = [];
-    outer:
     for (let dx = -STRUCT_RADIUS_CELLS; dx <= STRUCT_RADIUS_CELLS; dx++) {
       for (let dz = -STRUCT_RADIUS_CELLS; dz <= STRUCT_RADIUS_CELLS; dz++) {
         const gx = scx + dx, gz = scz + dz;
@@ -506,9 +511,14 @@
         if (d < 6) continue; // generous deadzone so nothing looms over the player
         const type = Math.min(3, Math.floor(hash2(gx + 9200, gz + 9200) * 4));
         candidates.push({ key: gx + "," + gz, gx, gz, wx, wz, type, d });
-        if (candidates.length >= MAX_STRUCTURES) break outer;
       }
     }
+    // Prefer the nearest structures when more candidates fall in range than
+    // the pool can hold (49-cell scan at ~0.16 hit rate can exceed
+    // MAX_STRUCTURES) — otherwise scan order alone could bump a close
+    // structure in favor of a farther, less relevant one.
+    candidates.sort((a, b) => a.d - b.d);
+    if (candidates.length > MAX_STRUCTURES) candidates.length = MAX_STRUCTURES;
     const usedSlots = new Set();
     for (const cand of candidates) {
       let slotIdx = structPool.findIndex((s) => s.key === cand.key);

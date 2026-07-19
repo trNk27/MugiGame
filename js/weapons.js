@@ -256,7 +256,14 @@
           mesh.rotation.x = -Math.PI / 2; // lay flat; local +X (theta=0) stays the group's forward axis
           const group = new THREE.Group();
           group.position.set(px, game.FX_Y, pz);
-          group.rotation.y = angle;
+          // `angle` here is a plain 2D polar angle over (x,z) — i.e. its own
+          // local +X axis maps to world (cos(angle), sin(angle)) — which is
+          // exactly the convention `_strike`'s hitbox math above assumes.
+          // THREE's Y-axis rotation uses a different convention (local +X
+          // maps to world (cos(y), -sin(y))), so applying `angle` directly
+          // to rotation.y mirrors the visual across Z relative to the real
+          // facing/hitbox direction. Negate to align the mesh with facing.
+          group.rotation.y = -angle;
           group.add(mesh);
           game.fxRoot.add(group);
           this._fx.push({ group, geo, mat, life: 1 });
@@ -551,7 +558,7 @@
   }
 
   // Circle-sector geometry laid flat (local +X == theta=0, matches the
-  // group.rotation.y = angle convention used by klassisch's slash fx above).
+  // group.rotation.y = -angle convention used by klassisch's slash fx above).
   const flammeConeGeo = new THREE.CircleGeometry(1, 24, -FLAMME_CONE_HALF_ANGLE, FLAMME_CONE_HALF_ANGLE * 2);
   flammeConeGeo.rotateX(-Math.PI / 2);
   flammeConeGeo.shared = true;
@@ -649,7 +656,10 @@
           mesh.scale.set(FLAMME_CONE_LEN, 1, FLAMME_CONE_LEN);
           const group = new THREE.Group();
           group.position.set(p.x, game.FX_Y, p.z);
-          group.rotation.y = angle;
+          // Same rotation.y sign fix as klassisch's _spawnSlashFx above —
+          // `angle` is a plain 2D (x,z) polar angle, not a THREE Y-rotation,
+          // so it must be negated to align the cone mesh with facing.
+          group.rotation.y = -angle;
           group.add(mesh);
           game.fxRoot.add(group);
           this._fx.push({ group, mat, life: 1 });
