@@ -52,8 +52,69 @@
 
   const scene = new THREE.Scene();
   MG.scene = scene;
-  scene.background = new THREE.Color(0x05060a);
-  scene.fog = new THREE.Fog(0x0b0f1a, 16, 48);
+  // Daytime sky: a vertical-gradient background texture (screen-space —
+  // fine with the fixed-rotation chase camera) whose horizon color matches
+  // the fog color, so the green ground fades naturally into the sky.
+  const SKY_HORIZON = "#cfe3f2";
+  function buildSkyTexture() {
+    const cnv = document.createElement("canvas");
+    cnv.width = 2; cnv.height = 256;
+    const g = cnv.getContext("2d");
+    const grad = g.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0, "#3f86d4");
+    grad.addColorStop(0.55, "#8fbde8");
+    grad.addColorStop(1, SKY_HORIZON);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 2, 256);
+    const tex = new THREE.CanvasTexture(cnv);
+    return tex;
+  }
+  scene.background = buildSkyTexture();
+  scene.fog = new THREE.Fog(0xcfe3f2, 15, 40);
+
+  // Drifting billboard clouds high above the play plane. Kept in a ring
+  // around the player (offsets follow the player, so they never run out)
+  // with a slow eastward drift that wraps.
+  function buildCloudTexture() {
+    const cnv = document.createElement("canvas");
+    cnv.width = 128; cnv.height = 64;
+    const g = cnv.getContext("2d");
+    let seed = 11;
+    function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+    for (let i = 0; i < 7; i++) {
+      const x = 20 + rnd() * 88, y = 22 + rnd() * 20, r = 10 + rnd() * 16;
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, "rgba(255,255,255,0.85)");
+      grad.addColorStop(1, "rgba(255,255,255,0)");
+      g.fillStyle = grad;
+      g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+    }
+    return new THREE.CanvasTexture(cnv);
+  }
+  const cloudTex = buildCloudTexture();
+  const clouds = [];
+  const CLOUD_COUNT = 7, CLOUD_RANGE = 55;
+  for (let i = 0; i < CLOUD_COUNT; i++) {
+    const mat = new THREE.SpriteMaterial({ map: cloudTex, transparent: true, opacity: 0.55 + Math.random() * 0.25, depthWrite: false, fog: false });
+    const spr = new THREE.Sprite(mat);
+    const w = 10 + Math.random() * 10;
+    spr.scale.set(w, w * 0.45, 1);
+    scene.add(spr);
+    clouds.push({
+      spr,
+      ox: (Math.random() * 2 - 1) * CLOUD_RANGE,
+      oz: (Math.random() * 2 - 1) * CLOUD_RANGE,
+      y: 15 + Math.random() * 9,
+      drift: 0.25 + Math.random() * 0.35,
+    });
+  }
+  function updateClouds(dt, px, pz) {
+    for (const c of clouds) {
+      c.ox += c.drift * dt;
+      if (c.ox > CLOUD_RANGE) c.ox = -CLOUD_RANGE;
+      c.spr.position.set(px + c.ox, c.y, pz + c.oz);
+    }
+  }
 
   // fxRoot: weapons add their own three.js visual-effect objects here.
   // Cleared (all children removed + geometries/materials disposed, except
@@ -64,8 +125,8 @@
   MG.fxRoot = fxRoot;
 
   const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 120);
-  const CAM_OFFSET = new THREE.Vector3(0, 13, 11);
-  const CAM_LOOK_Y = 1.1;
+  const CAM_OFFSET = new THREE.Vector3(0, 10, 13);
+  const CAM_LOOK_Y = 2.0;
   const CAM_LERP_RATE = 8; // ~8/s smoothing
 
   function resize() {
@@ -82,12 +143,12 @@
   // ---------------------------------------------------------------------
   // Lighting
   // ---------------------------------------------------------------------
-  const hemi = new THREE.HemisphereLight(0x8fa8ff, 0x11121a, 0.9);
+  const hemi = new THREE.HemisphereLight(0xbfd9ff, 0x55744a, 0.85);
   scene.add(hemi);
-  const dirLight = new THREE.DirectionalLight(0xfff2d6, 1.05);
+  const dirLight = new THREE.DirectionalLight(0xfff6e0, 1.05);
   dirLight.position.set(-6, 10, 4);
   scene.add(dirLight);
-  const ambient = new THREE.AmbientLight(0x223047, 0.35);
+  const ambient = new THREE.AmbientLight(0x8a97a8, 0.16);
   scene.add(ambient);
 
   // ---------------------------------------------------------------------
@@ -102,30 +163,31 @@
     const cnv = document.createElement("canvas");
     cnv.width = 256; cnv.height = 256;
     const g = cnv.getContext("2d");
-    g.fillStyle = "#141b2e";
+    g.fillStyle = "#3f6b35";
     g.fillRect(0, 0, 256, 256);
-    // soft deterministic color mottling (darker/lighter blotches) so the
-    // ground reads less flat; kept low-alpha so it never competes with
+    // soft deterministic color mottling (darker/lighter grass blotches) so
+    // the meadow reads less flat; kept low-alpha so it never competes with
     // gameplay readability (enemies/particles/gems stay high-contrast).
     let seed = 3;
     function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 9; i++) {
       const x = rnd() * 256, y = rnd() * 256, r = 26 + rnd() * 46;
       const dark = rnd() > 0.5;
       const grad = g.createRadialGradient(x, y, 0, x, y, r);
-      grad.addColorStop(0, dark ? "rgba(6,9,18,0.32)" : "rgba(60,72,102,0.15)");
+      grad.addColorStop(0, dark ? "rgba(30,58,26,0.18)" : "rgba(150,190,105,0.10)");
       grad.addColorStop(1, "rgba(0,0,0,0)");
       g.fillStyle = grad;
       g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
     }
-    g.strokeStyle = "rgba(255,255,255,0.05)";
+    // whisper-faint tile edge: kept only as a motion cue while running
+    g.strokeStyle = "rgba(255,255,255,0.03)";
     g.lineWidth = 2;
     g.strokeRect(1, 1, 254, 254);
-    // sparse deterministic dots
+    // sparse deterministic dots (tiny flowers / light speckles)
     seed = 7;
-    g.fillStyle = "rgba(255,255,255,0.07)";
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 12; i++) {
       const x = rnd() * 256, y = rnd() * 256, s = 1.2 + rnd() * 1.6;
+      g.fillStyle = rnd() > 0.75 ? "rgba(240,235,170,0.25)" : "rgba(215,240,170,0.10)";
       g.beginPath(); g.arc(x, y, s, 0, Math.PI * 2); g.fill();
     }
     const tex = new THREE.CanvasTexture(cnv);
@@ -232,7 +294,7 @@
   const SCATTER_CELL = 5.5;
   const SCATTER_RADIUS_CELLS = 7;
   const MAX_ROCKS = 40;
-  const rockMat = new THREE.MeshStandardMaterial({ color: 0x2a3350, roughness: 0.9 });
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x6e736f, roughness: 0.9 });
   const rockMesh = new THREE.InstancedMesh(boxUnit, rockMat, MAX_ROCKS);
   rockMesh.count = 0;
   scene.add(rockMesh);
@@ -303,7 +365,7 @@
   // without a geometry rebuild once it's already resident in the pool. ---
   const structMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88 });
   function buildRuins(gx, gz) {
-    const stone = new THREE.Color(0x4b5468);
+    const stone = new THREE.Color(0x9a9d99);
     const parts = [];
     const n = 6;
     for (let i = 0; i < n; i++) {
@@ -323,9 +385,9 @@
     return mergeParts(parts);
   }
   function buildHut(gx, gz) {
-    const wall = new THREE.Color(0x2c2438);
-    const roof = new THREE.Color(0x1c2436);
-    const door = new THREE.Color(0x171225);
+    const wall = new THREE.Color(0xbfae8f);
+    const roof = new THREE.Color(0x8a4f3a);
+    const door = new THREE.Color(0x5c422e);
     return mergeParts([
       { geo: boxUnit, matrix: partMatrix(0, 0.55, 0, 0, 0, 0, 1.6, 1.1, 1.4), color: wall },
       { geo: pyramidUnit, matrix: partMatrix(0, 1.35, 0, 0, Math.PI / 4, 0, 1.35, 0.9, 1.35), color: roof },
@@ -333,7 +395,7 @@
     ]);
   }
   function buildTower(gx, gz) {
-    const stone = new THREE.Color(0x454f63);
+    const stone = new THREE.Color(0x87908f);
     const parts = [];
     let y = 0, ox = 0, oz = 0;
     for (let i = 0; i < 3; i++) {
@@ -355,7 +417,7 @@
     return mergeParts(parts);
   }
   function buildFence(gx, gz) {
-    const wood = new THREE.Color(0x5a4530);
+    const wood = new THREE.Color(0x8a6a45);
     const parts = [];
     const n = 5, spacing = 0.85, gapAt = 2;
     for (let i = 0; i < n; i++) {
@@ -428,9 +490,9 @@
             trunkMesh.setMatrixAt(trunkN++, _m4);
           }
           const canopyColor = new THREE.Color().setHSL(
-            0.5 + hash2(gx + 9, gz + 9) * 0.22,
-            0.22 + hash2(gx + 8, gz + 8) * 0.14,
-            0.11 + hash2(gx + 7, gz + 7) * 0.06
+            0.26 + hash2(gx + 9, gz + 9) * 0.1,
+            0.38 + hash2(gx + 8, gz + 8) * 0.16,
+            0.22 + hash2(gx + 7, gz + 7) * 0.1
           );
           const canH = 1.1 * s;
           _scaleV.set(canH, canH, canH);
@@ -485,7 +547,7 @@
         _m4.compose(new THREE.Vector3(wx, 0, wz), _quat, _scaleV);
         grassMesh.setMatrixAt(grassN, _m4);
         const t = hash2(gx + 1700, gz);
-        const col = new THREE.Color(0x2e4a3f).lerp(new THREE.Color(0x3a5a45), t);
+        const col = new THREE.Color(0x3f7a34).lerp(new THREE.Color(0x6fae4e), t);
         grassMesh.setColorAt(grassN, col);
         if (d < 9 && heroGrass.length < HERO_GRASS_N) heroGrass.push({ idx: grassN, x: wx, z: wz, rotY, lean, s });
         grassN++;
@@ -566,39 +628,51 @@
   // (no real alpha channel). Chroma-key the black away once at load (same
   // routine as the 2D game) so it draws as a clean transparent cutout.
   // ---------------------------------------------------------------------
-  let markusTexture = null;
-  let imgReady = false;
-  const markusRaw = new Image();
-  markusRaw.onload = () => {
-    try {
-      const off = document.createElement("canvas");
-      off.width = markusRaw.width;
-      off.height = markusRaw.height;
-      const octx = off.getContext("2d");
-      octx.drawImage(markusRaw, 0, 0);
-      const imgData = octx.getImageData(0, 0, off.width, off.height);
-      const d = imgData.data;
-      for (let i = 0; i < d.length; i += 4) {
-        const r = d[i], g = d[i + 1], b = d[i + 2];
-        const maxc = Math.max(r, g, b);
-        if (maxc < 28) d[i + 3] = 0;
-        else if (maxc < 60) d[i + 3] = Math.round(((maxc - 28) / (60 - 28)) * 255);
+  function loadCutoutTexture(src, onDone, onError) {
+    const raw = new Image();
+    raw.onload = () => {
+      let tex;
+      try {
+        const off = document.createElement("canvas");
+        off.width = raw.width;
+        off.height = raw.height;
+        const octx = off.getContext("2d");
+        octx.drawImage(raw, 0, 0);
+        const imgData = octx.getImageData(0, 0, off.width, off.height);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const r = d[i], g = d[i + 1], b = d[i + 2];
+          const maxc = Math.max(r, g, b);
+          if (maxc < 28) d[i + 3] = 0;
+          else if (maxc < 60) d[i + 3] = Math.round(((maxc - 28) / (60 - 28)) * 255);
+        }
+        octx.putImageData(imgData, 0, 0);
+        tex = new THREE.CanvasTexture(off);
+      } catch (e) {
+        // Cross-origin / file:// canvas read can fail in some browsers;
+        // fall back to the raw (un-keyed) image texture.
+        tex = new THREE.Texture(raw);
+        tex.needsUpdate = true;
       }
-      octx.putImageData(imgData, 0, 0);
-      markusTexture = new THREE.CanvasTexture(off);
-    } catch (e) {
-      // Cross-origin / file:// canvas read can fail in some browsers;
-      // fall back to the raw (un-keyed) image texture.
-      markusTexture = new THREE.Texture(markusRaw);
-      markusTexture.needsUpdate = true;
-    }
-    markusTexture.colorSpace = THREE.SRGBColorSpace || markusTexture.colorSpace;
-    markusTexture.needsUpdate = true;
-    imgReady = true;
-    baseEnemySpriteMat = new THREE.SpriteMaterial({ map: markusTexture, transparent: true, depthWrite: false });
-  };
-  markusRaw.src = "assets/markus.png";
+      tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
+      tex.needsUpdate = true;
+      onDone(tex);
+    };
+    if (onError) raw.onerror = onError;
+    raw.src = src;
+  }
+
   let baseEnemySpriteMat = new THREE.SpriteMaterial({ color: 0xcc9977, transparent: true }); // placeholder until image loads
+  // Second enemy face (assets/markus2.png). Optional: if the file is
+  // missing, markus2SpriteMat stays null and the enemy types that want it
+  // fall back to the first face plus their distinguishing tint color.
+  let markus2SpriteMat = null;
+  loadCutoutTexture("assets/markus.png", (tex) => {
+    baseEnemySpriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  });
+  loadCutoutTexture("assets/markus2.png", (tex) => {
+    markus2SpriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  }, () => { markus2SpriteMat = null; });
 
   // ---------------------------------------------------------------------
   // Audio (WebAudio only, synthesized, no files) — unchanged from the 2D
@@ -779,7 +853,7 @@
   const player = {
     x: 0, z: 0, r: MG.px(22),
     hp: 100,
-    stats: { speed: MG.px(220), maxHp: 130, regen: 0, pickupRadius: MG.px(90) },
+    stats: { speed: MG.px(220), maxHp: 130, regen: 0, pickupRadius: MG.px(90), dmgMult: 1, xpMult: 1, cdMult: 1 },
     facing: { x: 1, z: 0 },
     invuln: 0,
     bob: 0,
@@ -905,11 +979,20 @@
     _vHit.copy(_vNear).addScaledVector(_vDir, t);
     return { x: _vHit.x - player.x, z: _vHit.z - player.z };
   }
+  const FOOTPRINT_MAX_R = 18; // world units; top frustum corners graze the
+  // horizon since the camera tilted up for the sky, so their ground hits
+  // land absurdly far away — clamp them and let fog cover the spawn pop-in.
   function computeFootprint() {
     camera.updateMatrixWorld(true);
     // perimeter order: near-left, near-right, far-right, far-left
     const pts = [groundHitLocal(-1, -1), groundHitLocal(1, -1), groundHitLocal(1, 1), groundHitLocal(-1, 1)];
-    if (pts.every((p) => p)) footprint = pts;
+    if (pts.every((p) => p)) {
+      for (const p of pts) {
+        const len = Math.hypot(p.x, p.z);
+        if (len > FOOTPRINT_MAX_R) { p.x *= FOOTPRINT_MAX_R / len; p.z *= FOOTPRINT_MAX_R / len; }
+      }
+      footprint = pts;
+    }
     viewRadiusDirty = false;
   }
   // Ray (from local origin, direction dx,dz) vs. segment (ax,az)-(bx,bz):
@@ -944,19 +1027,33 @@
   // Balance note (ported verbatim from 2D): contact damage only ticks once
   // per player.invuln window regardless of how many enemies are touching
   // the player, so tuning stays governed by dmg / invuln, not enemy count.
+  // `img2: true` types prefer the second face (assets/markus2.png) and fall
+  // back to the first face if that file is missing; `tint` (a hex color)
+  // is always applied so the type stays distinguishable either way.
+  // `splits` spawns that many `mini` enemies on death; `boss: true` types
+  // are scheduled separately (never in the regular rotation), get a ground
+  // ring marker, and drop a chest + gem jackpot.
   const ENEMY_TYPES = {
     normal: { hp: 20, speed: MG.px(70), r: MG.px(26), dmg: 6, xp: 1 },
     flitzer: { hp: 10, speed: MG.px(130), r: MG.px(18), dmg: 5, xp: 1 },
-    brocken: { hp: 90, speed: MG.px(40), r: MG.px(44), dmg: 13, xp: 5, tint: true },
+    brocken: { hp: 90, speed: MG.px(40), r: MG.px(44), dmg: 13, xp: 5, tint: 0xdd5c4a },
+    wueterich: { hp: 45, speed: MG.px(95), r: MG.px(30), dmg: 10, xp: 3, img2: true, tint: 0xffb46a },
+    teiler: { hp: 40, speed: MG.px(55), r: MG.px(38), dmg: 8, xp: 3, img2: true, tint: 0xa5e08a, splits: 2 },
+    mini: { hp: 8, speed: MG.px(150), r: MG.px(14), dmg: 4, xp: 1, img2: true, tint: 0xa5e08a },
+    boss: { hp: 650, speed: MG.px(50), r: MG.px(72), dmg: 25, xp: 25, img2: true, boss: true },
   };
-  const TINT_COLOR = new THREE.Color(0xdd5c4a);
   const SLOW_COLOR = new THREE.Color(0x8fd7ff);
-  const NORMAL_COLOR = new THREE.Color(0xffffff);
   const FLASH_COLOR = new THREE.Color(0xffffff);
   const MAX_ENEMIES = 250;
   const enemies = [];
   MG.enemies = enemies;
   let spawnTimer = 1;
+
+  // Boss schedule: first boss at 120s, then every 100s; each subsequent
+  // boss gets +50% base HP on top of the normal time scaling.
+  const BOSS_FIRST_AT = 120, BOSS_INTERVAL = 100;
+  let nextBossAt = BOSS_FIRST_AT;
+  let bossCount = 0;
 
   function spawnInterval() {
     return Math.max(0.25, 1.2 - gameTime * 0.004);
@@ -966,43 +1063,90 @@
     const r = Math.random();
     if (t < 45) return "normal";
     if (t < 90) return r < 0.7 ? "normal" : "flitzer";
-    if (r < 0.5) return "normal";
-    if (r < 0.8) return "flitzer";
-    return "brocken";
+    if (t < 150) {
+      if (r < 0.5) return "normal";
+      if (r < 0.8) return "flitzer";
+      return "brocken";
+    }
+    if (t < 240) {
+      if (r < 0.4) return "normal";
+      if (r < 0.65) return "flitzer";
+      if (r < 0.85) return "brocken";
+      return "wueterich";
+    }
+    if (r < 0.35) return "normal";
+    if (r < 0.55) return "flitzer";
+    if (r < 0.72) return "brocken";
+    if (r < 0.88) return "wueterich";
+    return "teiler";
   }
 
-  function makeEnemySprite() {
-    const mat = baseEnemySpriteMat.clone();
+  function makeEnemySprite(useImg2) {
+    const tmpl = useImg2 && markus2SpriteMat ? markus2SpriteMat : baseEnemySpriteMat;
+    const mat = tmpl.clone();
     const spr = new THREE.Sprite(mat);
     scene.add(spr);
     return spr;
   }
 
+  // Faint red ground ring under bosses so they read as set-piece threats.
+  const bossRingGeo = new THREE.RingGeometry(0.82, 1, 40);
+  bossRingGeo.rotateX(-Math.PI / 2);
+  const bossRingMatTemplate = new THREE.MeshBasicMaterial({ color: 0xff4a3a, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false });
+
   function spawnEnemy(type) {
+    const a = Math.random() * Math.PI * 2;
+    spawnEnemyAt(type, null, null, a);
+  }
+  // Position override (ex/ez non-null) is used for splits (teiler death)
+  // and test seams; otherwise the enemy spawns just outside the visible
+  // ground footprint in direction `a`.
+  function spawnEnemyAt(type, exOverride, ezOverride, a) {
     if (viewRadiusDirty) computeFootprint();
     const t = ENEMY_TYPES[type];
     // Ease-in: spawn at 70% HP, ramping to full over the first 90s so the
     // opening minute stays gentle; the +10%/min growth applies throughout.
-    const earlyMul = Math.min(1, 0.7 + 0.3 * (gameTime / 90));
-    const hpMul = earlyMul * (1 + 0.1 * (gameTime / 60));
-    const a = Math.random() * Math.PI * 2;
-    // Just outside the visible ground footprint in this exact direction
-    // (see computeFootprint/spawnBoundaryDistance above), plus a flat
-    // margin so pop-in is never visible even with camera-lerp slack.
-    const ringR = spawnBoundaryDistance(a) * 1.15 + MG.px(60);
-    const ex = player.x + Math.cos(a) * ringR;
-    const ez = player.z + Math.sin(a) * ringR;
-    const sprite = makeEnemySprite();
+    // Bosses skip the early ramp (they can't appear that early anyway) and
+    // instead grow +50% per boss already beaten.
+    const earlyMul = t.boss ? 1 : Math.min(1, 0.7 + 0.3 * (gameTime / 90));
+    let hpMul = earlyMul * (1 + 0.1 * (gameTime / 60));
+    if (t.boss) hpMul *= 1 + 0.5 * bossCount;
+    let ex = exOverride, ez = ezOverride;
+    if (ex === null || ex === undefined) {
+      if (a === undefined) a = Math.random() * Math.PI * 2;
+      // Just outside the visible ground footprint in this exact direction
+      // (see computeFootprint/spawnBoundaryDistance above), plus a flat
+      // margin so pop-in is never visible even with camera-lerp slack.
+      const ringR = spawnBoundaryDistance(a) * 1.15 + MG.px(60);
+      ex = player.x + Math.cos(a) * ringR;
+      ez = player.z + Math.sin(a) * ringR;
+    }
+    const sprite = makeEnemySprite(t.img2);
     const d = t.r * 2;
     sprite.scale.set(d, d, 1);
     sprite.position.set(ex, t.r, ez);
+    let ringMesh = null;
+    if (t.boss) {
+      ringMesh = new THREE.Mesh(bossRingGeo, bossRingMatTemplate.clone());
+      const rr = t.r * 1.4;
+      ringMesh.scale.set(rr, 1, rr);
+      ringMesh.position.set(ex, FX_Y, ez);
+      scene.add(ringMesh);
+    }
+    const baseColor = new THREE.Color(
+      t.tint !== undefined ? t.tint :
+      (t.img2 && !markus2SpriteMat) ? 0x9ab0ff : // fallback-face distinguisher
+      0xffffff
+    );
+    if (t.boss && !markus2SpriteMat) baseColor.setHex(0xff8a70);
     enemies.push({
       type, x: ex, z: ez, y: t.r,
       hp: t.hp * hpMul, maxHp: t.hp * hpMul,
       speed: t.speed, r: t.r, contactDmg: t.dmg, xp: t.xp,
       wobble: Math.random() * Math.PI * 2,
       hitFlash: 0, knockX: 0, knockZ: 0, dead: false,
-      tint: !!t.tint,
+      baseColor,
+      boss: !!t.boss, splits: t.splits || 0, ringMesh,
       // Slow-effect hook (used by e.g. Frostpeitsche): while gameTime <
       // slowUntil, movement speed is multiplied by slowFactor.
       slowUntil: 0, slowFactor: 1,
@@ -1060,6 +1204,11 @@
   function disposeEnemy(e) {
     scene.remove(e.sprite);
     e.sprite.material.dispose();
+    if (e.ringMesh) {
+      scene.remove(e.ringMesh);
+      e.ringMesh.material.dispose();
+      e.ringMesh = null;
+    }
   }
 
   function updateEnemies(dt) {
@@ -1084,11 +1233,15 @@
       e.sprite.position.set(e.x, e.r + bob, e.z);
       e.sprite.material.rotation = Math.sin(e.wobble * 0.7) * 0.18;
       const slowed = gameTime < e.slowUntil;
-      const base = slowed ? SLOW_COLOR : (e.tint ? TINT_COLOR : NORMAL_COLOR);
+      const base = slowed ? SLOW_COLOR : e.baseColor;
       if (e.hitFlash > 0) {
         e.sprite.material.color.copy(base).lerp(FLASH_COLOR, e.hitFlash * 0.75);
       } else {
         e.sprite.material.color.copy(base);
+      }
+      if (e.ringMesh) {
+        e.ringMesh.position.set(e.x, FX_Y, e.z);
+        e.ringMesh.material.opacity = 0.4 + Math.sin(e.wobble * 1.4) * 0.15;
       }
     }
   }
@@ -1100,6 +1253,10 @@
   function hitEnemy(enemy, dmg, opts) {
     opts = opts || {};
     if (!enemy || enemy.dead) return;
+    // Shrine buffs ("permanente Upgrades", js/systems.js) raise dmgMult for
+    // the rest of the run; every weapon's damage funnels through here, so
+    // this one line is the whole implementation.
+    dmg = Math.max(1, Math.round(dmg * (player.stats.dmgMult || 1)));
     enemy.hp -= dmg;
     enemy.hitFlash = 1;
     const fx = opts.fromX !== undefined ? opts.fromX : player.x;
@@ -1115,6 +1272,23 @@
       addParticles(enemy.x, enemy.z, "#ff8a8a", 16);
       spawnGem(enemy.x, enemy.z, enemy.xp);
       killCount++;
+      // Teiler splits into minis where it fell.
+      if (enemy.splits > 0) {
+        for (let s = 0; s < enemy.splits; s++) {
+          const sa = Math.random() * Math.PI * 2;
+          spawnEnemyAt("mini", enemy.x + Math.cos(sa) * enemy.r * 0.8, enemy.z + Math.sin(sa) * enemy.r * 0.8);
+        }
+      }
+      // Boss rewards: a chest right where it fell + a ring of gold gems.
+      if (enemy.boss) {
+        addParticles(enemy.x, enemy.z, "#ffd54a", 40);
+        for (let g = 0; g < 5; g++) {
+          const ga = (g / 5) * Math.PI * 2;
+          spawnGem(enemy.x + Math.cos(ga) * 1.2, enemy.z + Math.sin(ga) * 1.2, 5);
+        }
+        if (MG.chests && typeof MG.chests.spawnAt === "function") MG.chests.spawnAt(enemy.x, enemy.z);
+        MG.sfx.levelup();
+      }
       // Food drop hook (js/systems.js). Duck-typed: core.js has zero hard
       // dependency on that file being loaded.
       if (MG.food && typeof MG.food.onEnemyDeath === "function") MG.food.onEnemyDeath(enemy.x, enemy.z);
@@ -1311,7 +1485,9 @@
   let currentLevelUpOptions = [];
 
   function addXP(n) {
-    xp += n;
+    // Shrine XP buff ("permanente Upgrades") — applied at the single entry
+    // point every XP source funnels through.
+    xp += Math.max(1, Math.round(n * (player.stats.xpMult || 1)));
     while (xp >= xpToNext) {
       xp -= xpToNext;
       level++;
@@ -1398,6 +1574,100 @@
         weaponRowEl.appendChild(div);
       }
     }
+    drawMinimap();
+  }
+
+  // ---------------------------------------------------------------------
+  // Minimap — 2D canvas overlay. Shows the horde as faint dots, and the
+  // things worth walking toward as icons: bosses (💀), shrines/permanent
+  // upgrades (⭐, js/systems.js), chests (🧰) and food (🥨). Targets beyond
+  // the map's world range are clamped to the rim so you always know which
+  // direction to run.
+  // ---------------------------------------------------------------------
+  const minimapCanvas = document.getElementById("minimap");
+  const minimapCtx = minimapCanvas ? minimapCanvas.getContext("2d") : null;
+  const MINIMAP_RANGE = 30; // world units from player to map edge
+
+  function minimapPlot(ctx, half, wx, wz, clampToRim) {
+    let dx = (wx - player.x) / MINIMAP_RANGE;
+    let dz = (wz - player.z) / MINIMAP_RANGE;
+    const len = Math.hypot(dx, dz);
+    let rimmed = false;
+    if (len > 1) {
+      if (!clampToRim) return null;
+      dx /= len; dz /= len;
+      rimmed = true;
+    }
+    return { x: half + dx * (half - 10), y: half + dz * (half - 10), rimmed };
+  }
+
+  function drawMinimap() {
+    if (!minimapCtx) return;
+    const ctx = minimapCtx;
+    const size = minimapCanvas.width;
+    const half = size / 2;
+    ctx.clearRect(0, 0, size, size);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(half, half, half - 2, 0, Math.PI * 2);
+    ctx.clip();
+    // faint range ring
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(half, half, (half - 10) * 0.5, 0, Math.PI * 2); ctx.stroke();
+    // horde: faint dots (regular), bosses drawn after as icons
+    for (const e of enemies) {
+      if (e.dead || e.boss) continue;
+      const p = minimapPlot(ctx, half, e.x, e.z, false);
+      if (!p) continue;
+      ctx.fillStyle = "rgba(255,90,80,0.55)";
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    }
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // chests + food (duck-typed; js/systems.js)
+    if (MG.chests && MG.chests.list) {
+      ctx.font = "11px sans-serif";
+      for (const c of MG.chests.list) {
+        const p = minimapPlot(ctx, half, c.x, c.z, true);
+        if (p) { ctx.globalAlpha = p.rimmed ? 0.65 : 1; ctx.fillText("🧰", p.x, p.y); }
+      }
+    }
+    if (MG.food && MG.food.list) {
+      ctx.font = "10px sans-serif";
+      for (const f of MG.food.list) {
+        const p = minimapPlot(ctx, half, f.x, f.z, false);
+        if (p) { ctx.globalAlpha = 1; ctx.fillText(f.type && f.type.icon ? f.type.icon : "🥨", p.x, p.y); }
+      }
+    }
+    // shrines (permanent upgrades)
+    if (MG.shrines && MG.shrines.list) {
+      ctx.font = "13px sans-serif";
+      for (const s of MG.shrines.list) {
+        const p = minimapPlot(ctx, half, s.x, s.z, true);
+        if (p) { ctx.globalAlpha = p.rimmed ? 0.75 : 1; ctx.fillText("⭐", p.x, p.y); }
+      }
+    }
+    // bosses on top
+    ctx.font = "13px sans-serif";
+    for (const e of enemies) {
+      if (e.dead || !e.boss) continue;
+      const p = minimapPlot(ctx, half, e.x, e.z, true);
+      if (p) { ctx.globalAlpha = p.rimmed ? 0.8 : 1; ctx.fillText("💀", p.x, p.y); }
+    }
+    ctx.globalAlpha = 1;
+    // player arrow (facing direction) at center
+    const ang = Math.atan2(player.facing.z, player.facing.x);
+    ctx.translate(half, half);
+    ctx.rotate(ang);
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = "rgba(0,0,0,0.6)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(7, 0); ctx.lineTo(-5, 4.6); ctx.lineTo(-2.5, 0); ctx.lineTo(-5, -4.6);
+    ctx.closePath();
+    ctx.stroke(); ctx.fill();
+    ctx.restore();
   }
 
   // ---------------------------------------------------------------------
@@ -1465,6 +1735,7 @@
   function resetGame() {
     player.x = 0; player.z = 0;
     player.stats.speed = MG.px(220); player.stats.maxHp = 130; player.stats.regen = 0; player.stats.pickupRadius = MG.px(90);
+    player.stats.dmgMult = 1; player.stats.xpMult = 1; player.stats.cdMult = 1;
     player.hp = player.stats.maxHp;
     player.invuln = 0; player.facing.x = 1; player.facing.z = 0; player.bob = 0;
     playerYaw = Math.atan2(player.facing.x, player.facing.z);
@@ -1476,12 +1747,14 @@
     resetDamageNumbers();
     if (MG.chests && typeof MG.chests.reset === "function") MG.chests.reset();
     if (MG.food && typeof MG.food.reset === "function") MG.food.reset();
+    if (MG.shrines && typeof MG.shrines.reset === "function") MG.shrines.reset();
 
     for (const w of MG.weapons.owned) { if (typeof w.dispose === "function") w.dispose(MG); }
     clearFxRoot();
 
     level = 1; xp = 0; xpToNext = xpNeeded(1); levelUpQueue = 0;
     killCount = 0; gameTime = 0; spawnTimer = 1;
+    nextBossAt = BOSS_FIRST_AT; bossCount = 0;
     joystick.active = false;
     lastScatterCX = null; lastScatterCZ = null;
     viewRadiusDirty = true;
@@ -1562,12 +1835,20 @@
       spawnEnemy(pickEnemyType());
       spawnTimer = spawnInterval();
     }
+    // Boss schedule runs independently of the regular spawn rotation (and
+    // ignores MAX_ENEMIES — a boss is always allowed in).
+    if (gameTime >= nextBossAt) {
+      spawnEnemy("boss");
+      bossCount++;
+      nextBossAt += BOSS_INTERVAL;
+    }
     updateEnemies(dt);
     updateGems(dt);
     // Chests / food (js/systems.js). Duck-typed hooks so core.js has zero
     // hard dependency on that file being loaded.
     if (MG.chests && typeof MG.chests.update === "function") MG.chests.update(dt);
     if (MG.food && typeof MG.food.update === "function") MG.food.update(dt);
+    if (MG.shrines && typeof MG.shrines.update === "function") MG.shrines.update(dt);
 
     for (const w of MG.weapons.owned) w.update(dt, MG);
 
@@ -1576,6 +1857,7 @@
 
     updateCamera(dt, false);
     updateGround();
+    updateClouds(dt, player.x, player.z);
     refreshScatter();
     updateGrassSway(gameTime);
     if (viewRadiusDirty) computeFootprint();
@@ -1601,6 +1883,7 @@
   resize();
   updateCamera(0, true);
   updateGround();
+  updateClouds(0, 0, 0);
   refreshScatter();
   requestAnimationFrame(frame);
 
@@ -1617,5 +1900,9 @@
     renderer,
     get chests() { return MG.chests; },
     get food() { return MG.food; },
+    get shrines() { return MG.shrines; },
+    // QA seam: force-spawn any ENEMY_TYPES key (e.g. "boss", "teiler"),
+    // optionally at an exact position.
+    spawnEnemy(type, x, z) { spawnEnemyAt(type, x !== undefined ? x : null, z !== undefined ? z : null); },
   };
 })();

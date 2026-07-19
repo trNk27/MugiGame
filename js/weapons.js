@@ -138,6 +138,9 @@
     // top of Sanduhr. Duck-typed so weapons.js has zero hard dependency on
     // systems.js being loaded.
     if (MG.food && typeof MG.food.cooldownMult === "function") mult *= MG.food.cooldownMult();
+    // Shrine buff ("permanente Upgrades", js/systems.js): a permanent
+    // per-run cooldown multiplier stored on the player's stats.
+    if (MG.player && MG.player.stats && MG.player.stats.cdMult) mult *= MG.player.stats.cdMult;
     return mult;
   };
 
@@ -907,6 +910,212 @@
     },
   };
   MG.weapons.registry.push(frostDef);
+
+  // ==========================================================================
+  // Markus-Hammer (id 'hammer') — slams the ground ahead of the player:
+  // a heavy AoE shockwave that damages, knocks back hard, and briefly stuns
+  // (implemented via the same slowUntil/slowFactor fields the Frostpeitsche
+  // uses, with a near-zero factor).
+  // ==========================================================================
+  const HAMMER_LEVELS = [
+    null,
+    { cooldown: 2.4, dmg: 30, radius: MG.px(120), stun: 0.5 },
+    { cooldown: 2.4, dmg: 42, radius: MG.px(120), stun: 0.5 },  // L2: +12 dmg
+    { cooldown: 2.4, dmg: 42, radius: MG.px(155), stun: 0.5 },  // L3: +radius
+    { cooldown: 1.8, dmg: 42, radius: MG.px(155), stun: 0.5 },  // L4: faster
+    { cooldown: 1.8, dmg: 58, radius: MG.px(155), stun: 0.8 },  // L5: +dmg, +stun
+  ];
+  const HAMMER_STUN_FACTOR = 0.12;
+  const HAMMER_OFFSET = MG.px(110); // slam center this far ahead of the player
+
+  function describeHammerLevel(lvl) {
+    const s = HAMMER_LEVELS[lvl];
+    return "Hammer Lv" + lvl + ": " + s.dmg + " Schaden, betäubt " + s.stun + "s";
+  }
+
+  const hammerRingGeo = new THREE.RingGeometry(0.82, 1, 32);
+  hammerRingGeo.rotateX(-Math.PI / 2);
+  hammerRingGeo.shared = true;
+  const hammerRingMatTemplate = new THREE.MeshBasicMaterial({ color: 0xe8bc6a, transparent: true, opacity: 0.8, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+
+  const hammerDef = {
+    id: "hammer",
+    name: "Markus-Hammer",
+    icon: "🔨",
+    desc: "Schmettert vor dir auf den Boden: Flächenschaden und kurze Betäubung.",
+    maxLevel: HAMMER_LEVELS.length - 1,
+    type: "weapon",
+    describeLevel: describeHammerLevel,
+    create(game) {
+      return {
+        def: hammerDef,
+        level: 1,
+        _cd: 1.2,
+        _rings: [], // { mesh, mat, life 1 -> 0 over 0.4s, maxRadius }
+
+        update(dt, game) {
+          this._cd -= dt;
+          if (this._cd <= 0) {
+            this._slam(game);
+            this._cd = HAMMER_LEVELS[this.level].cooldown * MG.weapons.getCooldownMult();
+          }
+          for (let i = this._rings.length - 1; i >= 0; i--) {
+            const r = this._rings[i];
+            r.life -= dt / 0.4;
+            if (r.life <= 0) {
+              game.fxRoot.remove(r.mesh);
+              r.mat.dispose();
+              this._rings.splice(i, 1);
+              continue;
+            }
+            const cur = Math.max(0.01, r.maxRadius * (1 - r.life));
+            r.mesh.scale.set(cur, cur, cur);
+            r.mat.opacity = Math.max(0, r.life) * 0.8;
+          }
+        },
+
+        _slam(game) {
+          const s = HAMMER_LEVELS[this.level];
+          const p = game.player;
+          const cx = p.x + p.facing.x * HAMMER_OFFSET;
+          const cz = p.z + p.facing.z * HAMMER_OFFSET;
+          for (const e of game.enemiesInRadius(cx, cz, s.radius)) {
+            game.hitEnemy(e, s.dmg, { fromX: cx, fromZ: cz, knockback: MG.px(240) });
+            // Stun: crush movement to near-zero briefly. Don't overwrite a
+            // longer-lasting existing slow with a shorter stun window.
+            const until = game.time + s.stun;
+            if (until > e.slowUntil || HAMMER_STUN_FACTOR < e.slowFactor) {
+              e.slowUntil = Math.max(e.slowUntil, until);
+              e.slowFactor = Math.min(e.slowFactor, HAMMER_STUN_FACTOR);
+            }
+          }
+          const mat = hammerRingMatTemplate.clone();
+          const mesh = new THREE.Mesh(hammerRingGeo, mat);
+          mesh.position.set(cx, game.FX_Y, cz);
+          mesh.scale.set(0.01, 0.01, 0.01);
+          game.fxRoot.add(mesh);
+          this._rings.push({ mesh, mat, life: 1, maxRadius: s.radius });
+          game.addParticles(cx, cz, "#c9a15f", 12);
+          game.sfx.hit();
+        },
+
+        levelUp() { this.level = Math.min(this.level + 1, hammerDef.maxLevel); },
+      };
+    },
+  };
+  MG.weapons.registry.push(hammerDef);
+
+  // ==========================================================================
+  // Geisterpeitsche (id 'geist') — launches homing spectral orbs that chase
+  // the nearest Markus and burst on contact. Orbs retarget if their victim
+  // dies mid-flight and fizzle after a few seconds if nothing is in range.
+  // ==========================================================================
+  const GEIST_LEVELS = [
+    null,
+    { cooldown: 1.6, dmg: 20, count: 1 },
+    { cooldown: 1.6, dmg: 20, count: 2 },  // L2: +1 orb
+    { cooldown: 1.6, dmg: 28, count: 2 },  // L3: +dmg
+    { cooldown: 1.1, dmg: 28, count: 2 },  // L4: faster
+    { cooldown: 1.1, dmg: 34, count: 3 },  // L5: +1 orb, +dmg
+  ];
+  const GEIST_RANGE = MG.px(420);
+  const GEIST_SPEED = MG.px(300);
+  const GEIST_LIFE = 4;
+  const GEIST_RETARGET_RANGE = MG.px(260);
+
+  function describeGeistLevel(lvl) {
+    const s = GEIST_LEVELS[lvl];
+    return "Geist Lv" + lvl + ": " + s.count + " Geist" + (s.count > 1 ? "er" : "") + ", " + s.dmg + " Schaden";
+  }
+
+  const geistGeo = new THREE.SphereGeometry(0.13, 10, 8);
+  geistGeo.shared = true;
+  const geistMatTemplate = new THREE.MeshBasicMaterial({ color: 0xbfe8ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
+
+  const geistDef = {
+    id: "geist",
+    name: "Geisterpeitsche",
+    icon: "👻",
+    desc: "Beschwört zielsuchende Geister, die den nächsten Markus jagen.",
+    maxLevel: GEIST_LEVELS.length - 1,
+    type: "weapon",
+    describeLevel: describeGeistLevel,
+    create(game) {
+      return {
+        def: geistDef,
+        level: 1,
+        _cd: 0.8,
+        _orbs: [], // { x, z, mesh, mat, target, life, sparkleT }
+
+        update(dt, game) {
+          this._cd -= dt;
+          if (this._cd <= 0) {
+            this._launch(game);
+            this._cd = GEIST_LEVELS[this.level].cooldown * MG.weapons.getCooldownMult();
+          }
+          const s = GEIST_LEVELS[this.level];
+          for (let i = this._orbs.length - 1; i >= 0; i--) {
+            const o = this._orbs[i];
+            o.life -= dt;
+            if (o.target && o.target.dead) o.target = null;
+            if (!o.target) o.target = game.nearestEnemy(o.x, o.z, GEIST_RETARGET_RANGE);
+            if (o.life <= 0) { this._popOrb(game, i, false); continue; }
+            let dirX = game.player.facing.x, dirZ = game.player.facing.z;
+            if (o.target) {
+              const dx = o.target.x - o.x, dz = o.target.z - o.z;
+              const d = Math.hypot(dx, dz) || 1;
+              dirX = dx / d; dirZ = dz / d;
+              if (d < o.target.r) {
+                game.hitEnemy(o.target, s.dmg, { fromX: o.x, fromZ: o.z, knockback: MG.px(100) });
+                this._popOrb(game, i, true);
+                continue;
+              }
+            }
+            o.x += dirX * GEIST_SPEED * dt;
+            o.z += dirZ * GEIST_SPEED * dt;
+            o.mesh.position.set(o.x, 0.6 + Math.sin(o.life * 9) * 0.08, o.z);
+            o.sparkleT -= dt;
+            if (o.sparkleT <= 0) {
+              game.addParticles(o.x, o.z, "#bfe8ff", 1);
+              o.sparkleT = 0.09;
+            }
+          }
+        },
+
+        _launch(game) {
+          const s = GEIST_LEVELS[this.level];
+          const p = game.player;
+          const candidates = game.enemiesInRadius(p.x, p.z, GEIST_RANGE).filter((e) => !e.dead);
+          if (candidates.length === 0) return; // hold fire with no target in range
+          for (let i = 0; i < s.count; i++) {
+            const target = candidates[Math.floor(Math.random() * candidates.length)];
+            const mat = geistMatTemplate.clone();
+            const mesh = new THREE.Mesh(geistGeo, mat);
+            mesh.position.set(p.x, 0.6, p.z);
+            game.fxRoot.add(mesh);
+            this._orbs.push({ x: p.x, z: p.z, mesh, mat, target, life: GEIST_LIFE, sparkleT: 0 });
+          }
+          game.sfx.crack();
+        },
+
+        _popOrb(game, idx, hit) {
+          const o = this._orbs[idx];
+          if (hit) game.addParticles(o.x, o.z, "#bfe8ff", 8);
+          game.fxRoot.remove(o.mesh);
+          o.mat.dispose();
+          this._orbs.splice(idx, 1);
+        },
+
+        dispose(game) {
+          for (const o of this._orbs) { game.fxRoot.remove(o.mesh); o.mat.dispose(); }
+          this._orbs.length = 0;
+        },
+
+        levelUp() { this.level = Math.min(this.level + 1, geistDef.maxLevel); },
+      };
+    },
+  };
+  MG.weapons.registry.push(geistDef);
 
   // ==========================================================================
   // Passive items — no visuals; they just mutate player stats on

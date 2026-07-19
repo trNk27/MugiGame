@@ -1,10 +1,11 @@
 # Peitsch den Markus: Survivors 3D 🪢
 
 Ein 3D-Survivors-like im Browser (Stil: Megabonk): Du steuerst einen
-Peitschenschwinger durch eine endlose Low-Poly-Welt und wehrst dich gegen eine
-ständig wachsende Horde von Markus-Köpfen. Bewegen, überleben, XP sammeln,
-aufleveln, Truhen plündern, Brezeln futtern – bis die Horde dich irgendwann
-doch einholt.
+Peitschenschwinger durch eine endlose, sonnige Low-Poly-Wiese und wehrst dich
+gegen eine ständig wachsende Horde von Markus-Köpfen – inklusive dicker
+Boss-Markusse. Bewegen, überleben, XP sammeln, aufleveln, Truhen plündern,
+Schreine für permanente Boni finden – bis die Horde dich irgendwann doch
+einholt. Die Minimap unten rechts zeigt dir immer den Weg.
 
 ## Spielen
 
@@ -30,6 +31,14 @@ python3 -m http.server 8000
 
 - Feinde ("Markus"-Köpfe) tauchen am Rand des Sichtfelds auf und rücken auf
   dich zu; je länger die Runde läuft, desto mehr und desto härter wird es.
+  Ab 2:30 kommen Wüteriche dazu (schnell und bissig), ab 4:00 Teiler, die
+  beim Tod in zwei flinke Mini-Markusse zerfallen.
+- Ab Minute 2 erscheint alle ~100 Sekunden ein **Boss-Markus** (💀 auf der
+  Minimap): groß, zäh (wird mit jedem Boss zäher), roter Bodenring. Zur
+  Belohnung lässt er eine Truhe und einen XP-Kranz fallen.
+- Die **Minimap** (unten rechts) zeigt die Horde als Punkte sowie 💀 Bosse,
+  ⭐ Schreine, 🧰 Truhen und Essen; was außer Reichweite ist, klebt als
+  Richtungspfeil am Kartenrand.
 - Getötete Feinde lassen XP-Kristalle fallen. Ist die XP-Leiste voll, gibt's
   einen Level-Up mit 3 zufälligen Karten zur Auswahl.
 - Berührt dich ein Feind, verlierst du HP (kurze Unverwundbarkeit nach jedem
@@ -46,6 +55,8 @@ python3 -m http.server 8000
 | 🔥 | Flammenpeitsche | Peitscht einen brennenden Kegel vor dir und hinterlässt Feuerflecken, die weiter Schaden machen. |
 | 🪃 | Schleuderpeitsche | Schleudert spinnende Peitschenknoten, die durch Gegner fliegen und zu dir zurückkehren. |
 | ❄️ | Frostpeitsche | Frost-Nova um dich herum: verletzt und verlangsamt alle Feinde in Reichweite. |
+| 🔨 | Markus-Hammer | Schmettert vor dir auf den Boden: Flächenschaden, harter Rückstoß und kurze Betäubung. |
+| 👻 | Geisterpeitsche | Beschwört zielsuchende Geister, die den nächsten Markus jagen und beim Aufprall zerplatzen. |
 
 ## Passive Items (max. Stufe 3)
 
@@ -58,6 +69,23 @@ python3 -m http.server 8000
 
 Reicht der Kartenpool nicht (z. B. wenn schon alles maximiert ist), springt
 als Notlösung die 🥨 **Brezel**-Karte ein: +30 HP, sofort.
+
+## Schreine ⛩️ (permanente Upgrades)
+
+Ab Minute 1 taucht regelmäßig ein leuchtender Schrein auf (⭐ auf der
+Minimap, maximal 1 gleichzeitig, verschwindet nie von selbst). Lauf hinein
+und du bekommst einen zufälligen **permanenten** Bonus für den Rest der
+Runde:
+
+| Bonus | Effekt |
+|---|---|
+| 💪 | +15 % Schaden (alle Waffen) |
+| 👟 | +10 % Lauftempo |
+| ❤️ | +20 max. HP (und sofort geheilt) |
+| ✨ | +15 % XP aus Kristallen |
+| ⚡ | −8 % Abklingzeit auf alles |
+
+Die Boni stapeln sich – wer fleißig Schreine abläuft, wird spürbar stärker.
 
 ## Truhen 🧰
 
@@ -106,8 +134,15 @@ angezogen – du musst drüberlaufen:
   HUD, State-Machine). `js/weapons.js`: alle Waffen und Passiven über ein
   kleines, dokumentiertes Plugin-API. `js/systems.js`: Truhen & Essen.
   Alle teilen sich `window.MG`.
-- Boden ist eine prozedurale CanvasTexture; Markus-Gegner sind
-  chroma-gekeyte Billboard-Sprites; Deko (Felsen/Bäume) per InstancedMesh.
+- Boden ist eine prozedurale CanvasTexture (grüne Wiese mit Mottling);
+  Himmel ist ein Gradient-Hintergrund mit driftenden Wolken-Billboards;
+  Markus-Gegner sind chroma-gekeyte Billboard-Sprites; Deko (Felsen, Bäume,
+  Gras, Bauwerke) per InstancedMesh.
+- Das zweite Gegner-Gesicht wird aus `assets/markus2.png` geladen; fehlt die
+  Datei, nutzen die neuen Gegnertypen automatisch das erste Gesicht mit
+  ihrer jeweiligen Erkennungsfarbe.
+- Minimap ist ein 2D-Canvas-Overlay, das jede Frame Spieler, Horde, Bosse,
+  Schreine, Truhen und Essen plottet (mit Rand-Clamping für ferne Ziele).
 - Sound-Effekte werden per WebAudio zur Laufzeit synthetisiert (keine
   Audiodateien).
 - Debug-Hook für QA/Tests: `window.__game` (`gainXP(n)`, `player`, `enemies`,

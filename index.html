@@ -76,6 +76,17 @@
     position: absolute; bottom: 16px; left: 16px;
     display: flex; gap: 8px;
   }
+  #minimap {
+    position: absolute; bottom: 16px; right: 16px;
+    width: 148px; height: 148px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,213,74,0.55);
+    background: rgba(12,20,12,0.66);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  }
+  @media (max-width: 480px) {
+    #minimap { width: 104px; height: 104px; bottom: 74px; }
+  }
   .weapon-icon {
     position: relative; width: 42px; height: 42px;
     background: rgba(10,10,18,0.65);
@@ -170,13 +181,14 @@
     <div id="hpLabel">HP 100/100</div>
     <div id="killCounter">☠ 0</div>
     <div id="weaponRow"></div>
+    <canvas id="minimap" width="148" height="148"></canvas>
   </div>
 
   <!-- Start screen -->
   <div id="startOverlay" class="overlay">
     <h1>Peitsch den Markus: Survivors</h1>
     <p>WASD / Pfeiltasten bzw. Finger ziehen zum Bewegen durch die 3D-Welt. Waffen feuern automatisch.</p>
-    <p>XP sammeln, aufleveln, die Markus-Horde überleben! Halte Ausschau nach Truhen 📦 und Essen 🥨 in der Welt.</p>
+    <p>XP sammeln, aufleveln, die Markus-Horde überleben! Die Minimap zeigt dir den Weg zu Bossen 💀, Schreinen ⭐ (permanente Boni), Truhen 🧰 und Essen 🥨.</p>
     <button class="btn" id="startBtn">Los geht's!</button>
     <div class="hint">Esc = Pause</div>
   </div>
