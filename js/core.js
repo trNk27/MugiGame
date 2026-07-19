@@ -754,6 +754,9 @@
       addParticles(enemy.x, enemy.z, "#ff8a8a", 16);
       spawnGem(enemy.x, enemy.z, enemy.xp);
       killCount++;
+      // Food drop hook (js/systems.js). Duck-typed: core.js has zero hard
+      // dependency on that file being loaded.
+      if (MG.food && typeof MG.food.onEnemyDeath === "function") MG.food.onEnemyDeath(enemy.x, enemy.z);
     }
   }
   MG.hitEnemy = hitEnemy;
@@ -908,6 +911,7 @@
     scene.add(mesh);
     gems.push({ x, z, value, r, baseY: r + 0.15, mesh, spin: Math.random() * Math.PI * 2 });
   }
+  MG.spawnGem = spawnGem; // exposed for js/systems.js (chest XP-jackpot reward)
   function updateGems(dt) {
     for (let i = gems.length - 1; i >= 0; i--) {
       const g = gems[i];
@@ -1109,6 +1113,8 @@
     resetGems();
     resetParticles();
     resetDamageNumbers();
+    if (MG.chests && typeof MG.chests.reset === "function") MG.chests.reset();
+    if (MG.food && typeof MG.food.reset === "function") MG.food.reset();
 
     for (const w of MG.weapons.owned) { if (typeof w.dispose === "function") w.dispose(MG); }
     clearFxRoot();
@@ -1197,6 +1203,10 @@
     }
     updateEnemies(dt);
     updateGems(dt);
+    // Chests / food (js/systems.js). Duck-typed hooks so core.js has zero
+    // hard dependency on that file being loaded.
+    if (MG.chests && typeof MG.chests.update === "function") MG.chests.update(dt);
+    if (MG.food && typeof MG.food.update === "function") MG.food.update(dt);
 
     for (const w of MG.weapons.owned) w.update(dt, MG);
 
@@ -1243,5 +1253,7 @@
     gainXP(n) { addXP(n); },
     get time() { return gameTime; },
     renderer,
+    get chests() { return MG.chests; },
+    get food() { return MG.food; },
   };
 })();
