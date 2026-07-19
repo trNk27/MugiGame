@@ -78,6 +78,7 @@ was tatsächlich fliegt oder rotiert (Geisterpeitsche, Kreiselpeitsche).
 | 🧶 | Knotensack | +1 Projektil/Seite/Spitze/Kette/Orb pro Stufe (max. Stufe 3). |
 | 🫧 | Riesenknoten | +18 % Projektil-/Effektgröße pro Stufe: Hitboxen, Nova-Radius, Orb-Reichweite... (max. Stufe 3). |
 | 🌪️ | Peitschenöl | +20 % Projektiltempo pro Stufe: schnellere Geister-Orbs, schnellere Kreiselpeitsche (max. Stufe 3). |
+| 💪 | Proteinpulver | +12 % Schaden pro Stufe, auf alle Waffen (max. Stufe 3). |
 
 Reicht der Kartenpool nicht (z. B. wenn schon alles maximiert ist), springt
 als Notlösung die 🥨 **Brezel**-Karte ein: +30 HP, sofort.

@@ -1046,6 +1046,34 @@
   };
   MG.weapons.registry.push(uhrDef);
 
+  // ---- Proteinpulver: +12% Schaden auf alles pro Stufe ----
+  // Applied at core.js's hitEnemy() chokepoint via MG.weapons.getDamageMult()
+  // (derived fresh from the owned instance's level, same pattern as
+  // getCooldownMult — self-resets on new runs).
+  const kraftDef = {
+    id: "kraft",
+    name: "Proteinpulver",
+    icon: "💪",
+    desc: "+12% Schaden pro Stufe, auf alle Waffen.",
+    maxLevel: 3,
+    type: "passive",
+    describeLevel(lvl) { return "Proteinpulver Lv" + lvl + ": +" + Math.round(((1 + 0.12 * lvl) - 1) * 100) + "% Schaden (gesamt)"; },
+    create(game) {
+      return {
+        def: kraftDef,
+        level: 1,
+        update() {},
+        levelUp() { this.level = Math.min(this.level + 1, kraftDef.maxLevel); },
+      };
+    },
+  };
+  MG.weapons.registry.push(kraftDef);
+
+  MG.weapons.getDamageMult = function () {
+    const inst = MG.weapons.owned.find((w) => w.def.id === "kraft");
+    return inst ? 1 + 0.12 * inst.level : 1;
+  };
+
   // ---- Knotensack: +1 Projektil/Seite/Kette pro Stufe (weapon-focused) ----
   // Purely derived via MG.weapons.getProjectileBonus() above — this
   // instance itself carries no extra state beyond level.

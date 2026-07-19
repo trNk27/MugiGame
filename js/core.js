@@ -1106,20 +1106,20 @@
   // are scheduled separately (never in the regular rotation), get a ground
   // ring marker, and drop a chest + gem jackpot.
   const ENEMY_TYPES = {
-    normal: { hp: 20, speed: MG.px(70), r: MG.px(26), dmg: 6, xp: 1 },
-    flitzer: { hp: 10, speed: MG.px(130), r: MG.px(18), dmg: 5, xp: 1 },
-    brocken: { hp: 90, speed: MG.px(40), r: MG.px(44), dmg: 13, xp: 5, tint: 0xdd5c4a },
-    wueterich: { hp: 45, speed: MG.px(95), r: MG.px(30), dmg: 10, xp: 3, img2: true, tint: 0xffb46a },
-    teiler: { hp: 40, speed: MG.px(55), r: MG.px(38), dmg: 8, xp: 3, img2: true, tint: 0xa5e08a, splitsInto: ["mini", "mini"] },
-    mini: { hp: 8, speed: MG.px(150), r: MG.px(14), dmg: 4, xp: 1, img2: true, tint: 0xa5e08a },
-    boss: { hp: 650, speed: MG.px(50), r: MG.px(72), dmg: 25, xp: 25, img2: true, boss: true },
+    normal: { hp: 16, speed: MG.px(70), r: MG.px(26), dmg: 6, xp: 1 },
+    flitzer: { hp: 8, speed: MG.px(130), r: MG.px(18), dmg: 5, xp: 1 },
+    brocken: { hp: 72, speed: MG.px(40), r: MG.px(44), dmg: 13, xp: 5, tint: 0xdd5c4a },
+    wueterich: { hp: 36, speed: MG.px(95), r: MG.px(30), dmg: 10, xp: 3, img2: true, tint: 0xffb46a },
+    teiler: { hp: 32, speed: MG.px(55), r: MG.px(38), dmg: 8, xp: 3, img2: true, tint: 0xa5e08a, splitsInto: ["mini", "mini"] },
+    mini: { hp: 6, speed: MG.px(150), r: MG.px(14), dmg: 4, xp: 1, img2: true, tint: 0xa5e08a },
+    boss: { hp: 520, speed: MG.px(50), r: MG.px(72), dmg: 25, xp: 25, img2: true, boss: true },
     // Amalgam enemies (composite two-headed texture) — see buildAmalgamTexture.
-    doppel: { hp: 130, speed: MG.px(65), r: MG.px(48), dmg: 14, xp: 6, amalgam: true, splitsInto: ["normal", "wueterich"] },
-    riese: { hp: 350, speed: MG.px(35), r: MG.px(90), dmg: 30, xp: 12, amalgam: true, tint: 0x9a86b8, splitsInto: ["wueterich", "wueterich", "wueterich"] },
+    doppel: { hp: 104, speed: MG.px(65), r: MG.px(48), dmg: 14, xp: 6, amalgam: true, splitsInto: ["normal", "wueterich"] },
+    riese: { hp: 280, speed: MG.px(35), r: MG.px(90), dmg: 30, xp: 12, amalgam: true, tint: 0x9a86b8, splitsInto: ["wueterich", "wueterich", "wueterich"] },
     // Goldener Markus — rare harmless "fleeing" pickup enemy, not part of
     // the regular pickEnemyType rotation (spawned on its own timer, see
     // updateGoldenMarkus below).
-    gold: { hp: 60, speed: MG.px(160), r: MG.px(26), dmg: 0, xp: 0, tint: 0xffd700, flees: true, lifetime: 12 },
+    gold: { hp: 48, speed: MG.px(160), r: MG.px(26), dmg: 0, xp: 0, tint: 0xffd700, flees: true, lifetime: 12 },
   };
   const SLOW_COLOR = new THREE.Color(0x8fd7ff);
   const FLASH_COLOR = new THREE.Color(0xffffff);
@@ -1388,9 +1388,12 @@
     opts = opts || {};
     if (!enemy || enemy.dead) return;
     // Shrine buffs ("permanente Upgrades", js/systems.js) raise dmgMult for
-    // the rest of the run; every weapon's damage funnels through here, so
-    // this one line is the whole implementation.
-    dmg = Math.max(1, Math.round(dmg * (player.stats.dmgMult || 1)));
+    // the rest of the run, and the Proteinpulver passive multiplies on top
+    // (duck-typed, derived from its owned level in js/weapons.js); every
+    // weapon's damage funnels through here, so these two lines are the
+    // whole implementation.
+    const passiveDmg = MG.weapons && typeof MG.weapons.getDamageMult === "function" ? MG.weapons.getDamageMult() : 1;
+    dmg = Math.max(1, Math.round(dmg * (player.stats.dmgMult || 1) * passiveDmg));
     enemy.hp -= dmg;
     enemy.hitFlash = 1;
     const fx = opts.fromX !== undefined ? opts.fromX : player.x;
@@ -1628,7 +1631,7 @@
   // ---------------------------------------------------------------------
   // XP / leveling
   // ---------------------------------------------------------------------
-  function xpNeeded(lv) { return Math.round(5 * Math.pow(lv, 1.35)); }
+  function xpNeeded(lv) { return Math.round(4 * Math.pow(lv, 1.30)); }
   let level = 1, xp = 0, xpToNext = xpNeeded(1);
   let levelUpQueue = 0;
   let currentLevelUpOptions = [];
