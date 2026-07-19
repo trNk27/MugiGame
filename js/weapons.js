@@ -144,6 +144,27 @@
     return mult;
   };
 
+  // Derived (not stored) helpers for the three "weapon-focused" passives
+  // below (Knotensack / Riesenknoten / Peitschenöl). Same pattern as
+  // getCooldownMult: read the owning instance's level straight off
+  // MG.weapons.owned every call, so a fresh run (which just empties that
+  // array) resets all three automatically — no extra reset hook needed.
+  // Weapons must call these fresh inside update()/strike methods, never
+  // cache the result on the instance at create() time, so a passive picked
+  // up or leveled mid-run takes effect immediately.
+  MG.weapons.getProjectileBonus = function () {
+    const inst = MG.weapons.owned.find((w) => w.def.id === "multi");
+    return inst ? inst.level : 0; // +1 projectile/side/chain/etc. per level, 0-3
+  };
+  MG.weapons.getSizeMult = function () {
+    const inst = MG.weapons.owned.find((w) => w.def.id === "size");
+    return 1 + 0.18 * (inst ? inst.level : 0);
+  };
+  MG.weapons.getSpeedMult = function () {
+    const inst = MG.weapons.owned.find((w) => w.def.id === "oil");
+    return 1 + 0.20 * (inst ? inst.level : 0);
+  };
+
   // ==========================================================================
   // Reference weapon: Klassische Peitsche (id 'klassisch')
   // Auto-acquired at game start. Cracks on the facing side every `cooldown`
@@ -216,15 +237,27 @@
           }
         },
 
+        // Knotensack (+1 side/crack per level, capped at 4) and Riesenknoten
+        // (+18%/level hitbox + visual arc size) are read fresh here every
+        // crack — never cached on the instance — so a passive picked up or
+        // leveled mid-run takes effect on the very next crack.
         _crack(game) {
-          const stats = WHIP_LEVELS[this.level];
+          const table = WHIP_LEVELS[this.level];
+          const bonus = MG.weapons.getProjectileBonus();
+          const sizeMult = MG.weapons.getSizeMult();
+          const effSides = Math.min(4, table.sides + bonus);
+          const stats = { dmg: table.dmg, w: table.w * sizeMult, h: table.h * sizeMult };
           const p = game.player;
           let fx = p.facing.x, fz = p.facing.z;
           if (Math.hypot(fx, fz) < 0.01) { fx = 1; fz = 0; } // default: face +x
           const angle = Math.atan2(fz, fx);
-          this._strike(game, p.x, p.z, angle, stats);
+          // Direction order for up to 4 simultaneous cracks: forward, back,
+          // left, right (relative to facing).
+          const OFFSETS = [0, Math.PI, Math.PI / 2, -Math.PI / 2];
+          for (let i = 0; i < effSides; i++) {
+            this._strike(game, p.x, p.z, angle + OFFSETS[i], stats);
+          }
           game.sfx.crack();
-          if (stats.sides >= 2) this._strike(game, p.x, p.z, angle + Math.PI, stats);
         },
 
         // Rectangular hitbox check on the XZ plane: rotate each enemy into
@@ -320,7 +353,6 @@
   ];
   const KREISEL_HIT_CD = 0.5;
   const KREISEL_TIP_R = MG.px(10);
-  const KREISEL_MAX_TIPS = 3;
 
   function describeKreiselLevel(lvl) {
     const s = KREISEL_LEVELS[lvl];
@@ -347,19 +379,6 @@
     describeLevel: describeKreiselLevel,
     create(game) {
       const root = new THREE.Group();
-      const tipObjs = [];
-      for (let i = 0; i < KREISEL_MAX_TIPS; i++) {
-        const knot = new THREE.Mesh(kreiselKnotGeo, kreiselKnotMat);
-        knot.scale.setScalar(KREISEL_TIP_R);
-        root.add(knot);
-        const trails = kreiselTrailMats.map((m) => {
-          const t = new THREE.Mesh(kreiselKnotGeo, m);
-          t.scale.setScalar(KREISEL_TIP_R * 0.7);
-          root.add(t);
-          return t;
-        });
-        tipObjs.push({ knot, trails });
-      }
       game.fxRoot.add(root);
       return {
         def: kreiselDef,
@@ -367,35 +386,70 @@
         _angle: 0,
         _lastHit: new WeakMap(),
         _root: root,
-        _tipObjs: tipObjs,
+        _tipObjs: [], // rebuilt on demand — see _rebuildTips
+        _tipR: KREISEL_TIP_R,
+        _sig: null, // "<count>_<tipR>" signature of the currently-built tip set
+
+        // Tip meshes are prebuilt (not per-frame allocated), but the count
+        // and size are no longer fixed — Knotensack (+1 tip/level) and
+        // Riesenknoten (+18%/level size) are read fresh every frame, so the
+        // tip set is only rebuilt when a cheap signature string actually
+        // changes (i.e. right after a relevant passive is picked/leveled).
+        _rebuildTips(game, count, tipR) {
+          for (const obj of this._tipObjs) {
+            this._root.remove(obj.knot);
+            obj.trails.forEach((t) => this._root.remove(t));
+          }
+          this._tipObjs = [];
+          this._tipR = tipR;
+          for (let i = 0; i < count; i++) {
+            const knot = new THREE.Mesh(kreiselKnotGeo, kreiselKnotMat);
+            knot.scale.setScalar(tipR);
+            this._root.add(knot);
+            const trails = kreiselTrailMats.map((m) => {
+              const t = new THREE.Mesh(kreiselKnotGeo, m);
+              t.scale.setScalar(tipR * 0.7);
+              this._root.add(t);
+              return t;
+            });
+            this._tipObjs.push({ knot, trails });
+          }
+        },
 
         update(dt, game) {
-          const s = KREISEL_LEVELS[this.level];
-          this._angle += s.speed * dt;
+          const table = KREISEL_LEVELS[this.level];
+          const bonus = MG.weapons.getProjectileBonus();
+          const sizeMult = MG.weapons.getSizeMult();
+          const speedMult = MG.weapons.getSpeedMult();
+          const tipCount = table.tips + bonus;
+          const radius = table.radius * sizeMult;
+          const tipR = KREISEL_TIP_R * sizeMult;
+          const sig = tipCount + "_" + tipR.toFixed(4);
+          if (sig !== this._sig) {
+            this._rebuildTips(game, tipCount, tipR);
+            this._sig = sig;
+          }
+          this._angle += table.speed * speedMult * dt;
           const p = game.player;
           this._root.position.set(p.x, game.FX_Y, p.z);
-          for (let i = 0; i < KREISEL_MAX_TIPS; i++) {
+          for (let i = 0; i < this._tipObjs.length; i++) {
             const obj = this._tipObjs[i];
-            const active = i < s.tips;
-            obj.knot.visible = active;
-            obj.trails.forEach((t) => (t.visible = active));
-            if (!active) continue;
-            const a = this._angle + (i / s.tips) * Math.PI * 2;
-            const tx = Math.cos(a) * s.radius, tz = Math.sin(a) * s.radius;
+            const a = this._angle + (i / tipCount) * Math.PI * 2;
+            const tx = Math.cos(a) * radius, tz = Math.sin(a) * radius;
             obj.knot.position.set(tx, 0, tz);
             obj.trails.forEach((t, k) => {
               const ta = a - (k + 1) * 0.2;
-              t.position.set(Math.cos(ta) * s.radius, 0, Math.sin(ta) * s.radius);
+              t.position.set(Math.cos(ta) * radius, 0, Math.sin(ta) * radius);
             });
             const wx = p.x + tx, wz = p.z + tz;
             for (const e of game.enemies) {
               if (e.dead) continue;
               const d = Math.hypot(e.x - wx, e.z - wz);
-              if (d <= e.r + KREISEL_TIP_R) {
+              if (d <= e.r + this._tipR) {
                 const last = this._lastHit.get(e);
                 if (last === undefined || game.time - last >= KREISEL_HIT_CD) {
                   this._lastHit.set(e, game.time);
-                  game.hitEnemy(e, s.dmg, { fromX: wx, fromZ: wz, knockback: MG.px(90) });
+                  game.hitEnemy(e, table.dmg, { fromX: wx, fromZ: wz, knockback: MG.px(90) });
                 }
               }
             }
@@ -468,8 +522,14 @@
           }
         },
 
+        // Knotensack adds chain jumps directly on top of the level table
+        // (so it grants a first chain even at L1-2, where the table itself
+        // has none yet); Riesenknoten widens the chain-jump search radius.
+        // Both read fresh here every strike.
         _strike(game) {
           const s = BLITZ_LEVELS[this.level];
+          const chains = s.chains + MG.weapons.getProjectileBonus();
+          const chainRange = s.chainRange * MG.weapons.getSizeMult();
           const p = game.player;
           const first = game.nearestEnemy(p.x, p.z, s.range);
           if (!first) return;
@@ -478,8 +538,8 @@
           game.hitEnemy(first, s.dmg, { fromX: p.x, fromZ: p.z, knockback: MG.px(120) });
           game.addParticles(first.x, first.z, "#eaffff", 6);
           let prev = first;
-          for (let c = 0; c < s.chains; c++) {
-            let best = null, bestD = s.chainRange;
+          for (let c = 0; c < chains; c++) {
+            let best = null, bestD = chainRange;
             for (const e of game.enemies) {
               if (e.dead || hitSet.has(e)) continue;
               const d = Math.hypot(e.x - prev.x, e.z - prev.z);
@@ -611,7 +671,10 @@
             patch.tick -= dt;
             if (patch.tick <= 0) {
               patch.tick += FLAMME_TICK;
-              for (const e of game.enemiesInRadius(patch.x, patch.z, FLAMME_PATCH_R)) {
+              // patch.r was captured at spawn time (Riesenknoten's size
+              // multiplier read fresh at that moment) — a already-placed
+              // patch keeps its own footprint rather than resizing live.
+              for (const e of game.enemiesInRadius(patch.x, patch.z, patch.r)) {
                 game.hitEnemy(e, s.burnDps * FLAMME_TICK, { fromX: patch.x, fromZ: patch.z, knockback: MG.px(20) });
               }
               game.addParticles(patch.x, patch.z, "#ffaa33", 2);
@@ -626,18 +689,26 @@
           }
         },
 
+        // Knotensack adds burn patches on top of the table; Riesenknoten
+        // scales both the cone (length AND width scale together — it's a
+        // uniformly-scaled sector mesh/hitbox) and each patch's radius.
+        // Both multipliers are read fresh right here, every lash.
         _lash(game) {
           const s = FLAMME_LEVELS[this.level];
+          const sizeMult = MG.weapons.getSizeMult();
+          const patchCount = s.patches + MG.weapons.getProjectileBonus();
+          const coneLen = FLAMME_CONE_LEN * sizeMult;
+          const patchR = FLAMME_PATCH_R * sizeMult;
           const p = game.player;
           let fx = p.facing.x, fz = p.facing.z;
           if (Math.hypot(fx, fz) < 0.01) { fx = 1; fz = 0; }
           const faceAngle = Math.atan2(fz, fx);
-          this._spawnConeFx(game, p, faceAngle);
+          this._spawnConeFx(game, p, faceAngle, coneLen);
           for (const e of game.enemies) {
             if (e.dead) continue;
             const dx = e.x - p.x, dz = e.z - p.z;
             const dist = Math.hypot(dx, dz);
-            if (dist > FLAMME_CONE_LEN + e.r) continue;
+            if (dist > coneLen + e.r) continue;
             const ang = Math.atan2(dz, dx);
             const diff = Math.abs(angleDiff(ang, faceAngle));
             const pad = Math.atan2(e.r, Math.max(dist, 1));
@@ -645,18 +716,18 @@
               game.hitEnemy(e, s.coneDmg, { fromX: p.x, fromZ: p.z, knockback: MG.px(130) });
             }
           }
-          for (let i = 0; i < s.patches; i++) {
-            const t = (i + 1) / (s.patches + 1);
-            const dist = t * FLAMME_CONE_LEN;
-            this._spawnPatch(game, p.x + fx * dist, p.z + fz * dist, s);
+          for (let i = 0; i < patchCount; i++) {
+            const t = (i + 1) / (patchCount + 1);
+            const dist = t * coneLen;
+            this._spawnPatch(game, p.x + fx * dist, p.z + fz * dist, s, patchR);
           }
           game.sfx.crack();
         },
 
-        _spawnConeFx(game, p, angle) {
+        _spawnConeFx(game, p, angle, coneLen) {
           const mat = flammeConeMatTemplate.clone();
           const mesh = new THREE.Mesh(flammeConeGeo, mat);
-          mesh.scale.set(FLAMME_CONE_LEN, 1, FLAMME_CONE_LEN);
+          mesh.scale.set(coneLen, 1, coneLen);
           const group = new THREE.Group();
           group.position.set(p.x, game.FX_Y, p.z);
           // Same rotation.y sign fix as klassisch's _spawnSlashFx above —
@@ -668,13 +739,13 @@
           this._fx.push({ group, mat, life: 1 });
         },
 
-        _spawnPatch(game, x, z, s) {
+        _spawnPatch(game, x, z, s, patchR) {
           const mat = flammePatchMatTemplate.clone();
           const mesh = new THREE.Mesh(flammePatchGeo, mat);
-          mesh.scale.set(FLAMME_PATCH_R, FLAMME_PATCH_R, FLAMME_PATCH_R);
+          mesh.scale.set(patchR, patchR, patchR);
           mesh.position.set(x, game.FX_Y, z);
           game.fxRoot.add(mesh);
-          this._patches.push({ x, z, life: s.patchLife, tick: FLAMME_TICK, mesh, mat });
+          this._patches.push({ x, z, r: patchR, life: s.patchLife, tick: FLAMME_TICK, mesh, mat });
         },
 
         levelUp() { this.level = Math.min(this.level + 1, flammeDef.maxLevel); },
@@ -682,150 +753,6 @@
     },
   };
   MG.weapons.registry.push(flammeDef);
-
-  // ==========================================================================
-  // Schleuderpeitsche (id 'schleuder') — throws spinning whip-knot
-  // projectile(s) that fly out then boomerang back to the player, piercing
-  // (hitting each enemy at most once outbound, once on return).
-  // ==========================================================================
-  const SCHLEUDER_LEVELS = [
-    null,
-    { cooldown: 1.8, count: 1, dmg: 18 },
-    { cooldown: 1.8, count: 2, dmg: 18 }, // L2: 2nd knot thrown backwards
-    { cooldown: 1.8, count: 2, dmg: 28 }, // L3: +10 dmg
-    { cooldown: 1.2, count: 2, dmg: 28 }, // L4: faster
-    { cooldown: 1.2, count: 3, dmg: 36 }, // L5: 3 knots spread, +8 dmg
-  ];
-  const SCHLEUDER_SPEED = MG.px(420);
-  const SCHLEUDER_RANGE = MG.px(260);
-  const SCHLEUDER_HIT_R = MG.px(10);
-
-  function schleuderAngles(count, baseAngle) {
-    if (count <= 1) return [baseAngle];
-    if (count === 2) return [baseAngle, baseAngle + Math.PI]; // out + straight back
-    return [baseAngle - 0.4, baseAngle, baseAngle + 0.4]; // 3-way spread
-  }
-
-  function describeSchleuderLevel(lvl) {
-    const s = SCHLEUDER_LEVELS[lvl];
-    return "Schleuderpeitsche Lv" + lvl + ": " + s.count + " Knoten, " + s.dmg + " Schaden, Cooldown " + s.cooldown.toFixed(1) + "s";
-  }
-
-  const schleuderKnotGeo = new THREE.TorusGeometry(1, 0.4, 6, 10);
-  schleuderKnotGeo.shared = true;
-  const schleuderKnotMat = new THREE.MeshStandardMaterial({ color: 0xffd54a, emissive: 0x7a4a1e, emissiveIntensity: 0.5, roughness: 0.4 });
-  schleuderKnotMat.shared = true;
-  const schleuderTrailGeo = new THREE.SphereGeometry(1, 8, 6);
-  schleuderTrailGeo.shared = true;
-  const schleuderTrailMats = [0.35, 0.22, 0.1].map((op) => {
-    const m = new THREE.MeshBasicMaterial({ color: 0xffd54a, transparent: true, opacity: op, depthWrite: false });
-    m.shared = true;
-    return m;
-  });
-
-  const schleuderDef = {
-    id: "schleuder",
-    name: "Schleuderpeitsche",
-    icon: "🪃",
-    desc: "Schleudert spinnende Peitschenknoten, die zurückkehren.",
-    maxLevel: SCHLEUDER_LEVELS.length - 1,
-    type: "weapon",
-    describeLevel: describeSchleuderLevel,
-    create(game) {
-      return {
-        def: schleuderDef,
-        level: 1,
-        _cd: 0.4,
-        _projs: [], // { x, z, angle, dist, phase, hitOut, hitBack, spin, group, knot, trailMeshes, hist }
-
-        update(dt, game) {
-          this._cd -= dt;
-          if (this._cd <= 0) {
-            this._throw(game);
-            this._cd = SCHLEUDER_LEVELS[this.level].cooldown * MG.weapons.getCooldownMult();
-          }
-          const s = SCHLEUDER_LEVELS[this.level];
-          for (let i = this._projs.length - 1; i >= 0; i--) {
-            const pr = this._projs[i];
-            if (pr.phase === "out") {
-              pr.x += Math.cos(pr.angle) * SCHLEUDER_SPEED * dt;
-              pr.z += Math.sin(pr.angle) * SCHLEUDER_SPEED * dt;
-              pr.dist += SCHLEUDER_SPEED * dt;
-              this._collide(game, pr, pr.hitOut, s.dmg);
-              if (pr.dist >= SCHLEUDER_RANGE) pr.phase = "back";
-            } else {
-              const dx = game.player.x - pr.x, dz = game.player.z - pr.z;
-              const d = Math.hypot(dx, dz) || 1;
-              pr.x += (dx / d) * SCHLEUDER_SPEED * dt;
-              pr.z += (dz / d) * SCHLEUDER_SPEED * dt;
-              this._collide(game, pr, pr.hitBack, s.dmg);
-              if (d < game.player.r + MG.px(8)) {
-                game.fxRoot.remove(pr.group);
-                pr.trailMeshes.forEach((tm) => game.fxRoot.remove(tm));
-                this._projs.splice(i, 1);
-                continue;
-              }
-            }
-            pr.spin += dt * 14;
-            pr.hist.push({ x: pr.x, z: pr.z });
-            if (pr.hist.length > 8) pr.hist.shift();
-            pr.group.position.set(pr.x, game.FX_Y + 0.3, pr.z);
-            pr.knot.rotation.set(pr.spin, pr.spin * 0.6, 0);
-            pr.trailMeshes.forEach((tm, k) => {
-              const idx = pr.hist.length - 1 - (k + 1) * 2;
-              if (idx >= 0) {
-                tm.visible = true;
-                tm.position.set(pr.hist[idx].x, game.FX_Y + 0.25, pr.hist[idx].z);
-              } else {
-                tm.visible = false;
-              }
-            });
-          }
-        },
-
-        _collide(game, pr, hitSet, dmg) {
-          for (const e of game.enemies) {
-            if (e.dead || hitSet.has(e)) continue;
-            if (Math.hypot(e.x - pr.x, e.z - pr.z) <= e.r + SCHLEUDER_HIT_R) {
-              hitSet.add(e);
-              game.hitEnemy(e, dmg, { fromX: pr.x, fromZ: pr.z, knockback: MG.px(110) });
-            }
-          }
-        },
-
-        _throw(game) {
-          const s = SCHLEUDER_LEVELS[this.level];
-          const p = game.player;
-          let fx = p.facing.x, fz = p.facing.z;
-          if (Math.hypot(fx, fz) < 0.01) { fx = 1; fz = 0; }
-          const baseAngle = Math.atan2(fz, fx);
-          for (const a of schleuderAngles(s.count, baseAngle)) {
-            const group = new THREE.Group();
-            const knot = new THREE.Mesh(schleuderKnotGeo, schleuderKnotMat);
-            knot.scale.setScalar(SCHLEUDER_HIT_R);
-            group.add(knot);
-            game.fxRoot.add(group);
-            const trailMeshes = schleuderTrailMats.map((m, k) => {
-              const tm = new THREE.Mesh(schleuderTrailGeo, m);
-              tm.scale.setScalar(SCHLEUDER_HIT_R * (0.75 - k * 0.15));
-              tm.visible = false;
-              game.fxRoot.add(tm);
-              return tm;
-            });
-            this._projs.push({
-              x: p.x, z: p.z, angle: a, dist: 0, phase: "out",
-              hitOut: new Set(), hitBack: new Set(), spin: 0,
-              group, knot, trailMeshes, hist: [],
-            });
-          }
-          game.sfx.crack();
-        },
-
-        levelUp() { this.level = Math.min(this.level + 1, schleuderDef.maxLevel); },
-      };
-    },
-  };
-  MG.weapons.registry.push(schleuderDef);
 
   // ==========================================================================
   // Frostpeitsche (id 'frost') — periodic nova that damages and slows
@@ -888,10 +815,13 @@
           }
         },
 
+        // Riesenknoten scales the nova radius (read fresh every nova); no
+        // projectile-count or speed concept applies to a single AoE pulse.
         _nova(game) {
           const s = FROST_LEVELS[this.level];
+          const radius = s.radius * MG.weapons.getSizeMult();
           const p = game.player;
-          for (const e of game.enemiesInRadius(p.x, p.z, s.radius)) {
+          for (const e of game.enemiesInRadius(p.x, p.z, radius)) {
             game.hitEnemy(e, s.dmg, { fromX: p.x, fromZ: p.z, knockback: MG.px(60) });
             e.slowUntil = game.time + s.slowDur;
             e.slowFactor = s.slowFactor;
@@ -901,7 +831,7 @@
           mesh.position.set(p.x, game.FX_Y, p.z);
           mesh.scale.set(0.01, 0.01, 0.01);
           game.fxRoot.add(mesh);
-          this._rings.push({ mesh, mat, life: 1, maxRadius: s.radius });
+          this._rings.push({ mesh, mat, life: 1, maxRadius: radius });
           game.sfx.hit();
         },
 
@@ -910,100 +840,6 @@
     },
   };
   MG.weapons.registry.push(frostDef);
-
-  // ==========================================================================
-  // Markus-Hammer (id 'hammer') — slams the ground ahead of the player:
-  // a heavy AoE shockwave that damages, knocks back hard, and briefly stuns
-  // (implemented via the same slowUntil/slowFactor fields the Frostpeitsche
-  // uses, with a near-zero factor).
-  // ==========================================================================
-  const HAMMER_LEVELS = [
-    null,
-    { cooldown: 2.4, dmg: 30, radius: MG.px(120), stun: 0.5 },
-    { cooldown: 2.4, dmg: 42, radius: MG.px(120), stun: 0.5 },  // L2: +12 dmg
-    { cooldown: 2.4, dmg: 42, radius: MG.px(155), stun: 0.5 },  // L3: +radius
-    { cooldown: 1.8, dmg: 42, radius: MG.px(155), stun: 0.5 },  // L4: faster
-    { cooldown: 1.8, dmg: 58, radius: MG.px(155), stun: 0.8 },  // L5: +dmg, +stun
-  ];
-  const HAMMER_STUN_FACTOR = 0.12;
-  const HAMMER_OFFSET = MG.px(110); // slam center this far ahead of the player
-
-  function describeHammerLevel(lvl) {
-    const s = HAMMER_LEVELS[lvl];
-    return "Hammer Lv" + lvl + ": " + s.dmg + " Schaden, betäubt " + s.stun + "s";
-  }
-
-  const hammerRingGeo = new THREE.RingGeometry(0.82, 1, 32);
-  hammerRingGeo.rotateX(-Math.PI / 2);
-  hammerRingGeo.shared = true;
-  const hammerRingMatTemplate = new THREE.MeshBasicMaterial({ color: 0xe8bc6a, transparent: true, opacity: 0.8, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
-
-  const hammerDef = {
-    id: "hammer",
-    name: "Markus-Hammer",
-    icon: "🔨",
-    desc: "Schmettert vor dir auf den Boden: Flächenschaden und kurze Betäubung.",
-    maxLevel: HAMMER_LEVELS.length - 1,
-    type: "weapon",
-    describeLevel: describeHammerLevel,
-    create(game) {
-      return {
-        def: hammerDef,
-        level: 1,
-        _cd: 1.2,
-        _rings: [], // { mesh, mat, life 1 -> 0 over 0.4s, maxRadius }
-
-        update(dt, game) {
-          this._cd -= dt;
-          if (this._cd <= 0) {
-            this._slam(game);
-            this._cd = HAMMER_LEVELS[this.level].cooldown * MG.weapons.getCooldownMult();
-          }
-          for (let i = this._rings.length - 1; i >= 0; i--) {
-            const r = this._rings[i];
-            r.life -= dt / 0.4;
-            if (r.life <= 0) {
-              game.fxRoot.remove(r.mesh);
-              r.mat.dispose();
-              this._rings.splice(i, 1);
-              continue;
-            }
-            const cur = Math.max(0.01, r.maxRadius * (1 - r.life));
-            r.mesh.scale.set(cur, cur, cur);
-            r.mat.opacity = Math.max(0, r.life) * 0.8;
-          }
-        },
-
-        _slam(game) {
-          const s = HAMMER_LEVELS[this.level];
-          const p = game.player;
-          const cx = p.x + p.facing.x * HAMMER_OFFSET;
-          const cz = p.z + p.facing.z * HAMMER_OFFSET;
-          for (const e of game.enemiesInRadius(cx, cz, s.radius)) {
-            game.hitEnemy(e, s.dmg, { fromX: cx, fromZ: cz, knockback: MG.px(240) });
-            // Stun: crush movement to near-zero briefly. Don't overwrite a
-            // longer-lasting existing slow with a shorter stun window.
-            const until = game.time + s.stun;
-            if (until > e.slowUntil || HAMMER_STUN_FACTOR < e.slowFactor) {
-              e.slowUntil = Math.max(e.slowUntil, until);
-              e.slowFactor = Math.min(e.slowFactor, HAMMER_STUN_FACTOR);
-            }
-          }
-          const mat = hammerRingMatTemplate.clone();
-          const mesh = new THREE.Mesh(hammerRingGeo, mat);
-          mesh.position.set(cx, game.FX_Y, cz);
-          mesh.scale.set(0.01, 0.01, 0.01);
-          game.fxRoot.add(mesh);
-          this._rings.push({ mesh, mat, life: 1, maxRadius: s.radius });
-          game.addParticles(cx, cz, "#c9a15f", 12);
-          game.sfx.hit();
-        },
-
-        levelUp() { this.level = Math.min(this.level + 1, hammerDef.maxLevel); },
-      };
-    },
-  };
-  MG.weapons.registry.push(hammerDef);
 
   // ==========================================================================
   // Geisterpeitsche (id 'geist') — launches homing spectral orbs that chase
@@ -1028,6 +864,7 @@
     return "Geist Lv" + lvl + ": " + s.count + " Geist" + (s.count > 1 ? "er" : "") + ", " + s.dmg + " Schaden";
   }
 
+  const GEIST_ORB_R = 0.13; // world units; matches geistGeo's baked radius at sizeMult 1
   const geistGeo = new THREE.SphereGeometry(0.13, 10, 8);
   geistGeo.shared = true;
   const geistMatTemplate = new THREE.MeshBasicMaterial({ color: 0xbfe8ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
@@ -1054,6 +891,13 @@
             this._cd = GEIST_LEVELS[this.level].cooldown * MG.weapons.getCooldownMult();
           }
           const s = GEIST_LEVELS[this.level];
+          // Riesenknoten (orb hit distance + visual scale) and Peitschenöl
+          // (flight speed) apply per-frame to every live orb — read fresh
+          // here rather than cached at launch, so a mid-flight level-up
+          // takes effect immediately.
+          const sizeMult = MG.weapons.getSizeMult();
+          const speedMult = MG.weapons.getSpeedMult();
+          const orbR = GEIST_ORB_R * sizeMult;
           for (let i = this._orbs.length - 1; i >= 0; i--) {
             const o = this._orbs[i];
             o.life -= dt;
@@ -1065,15 +909,16 @@
               const dx = o.target.x - o.x, dz = o.target.z - o.z;
               const d = Math.hypot(dx, dz) || 1;
               dirX = dx / d; dirZ = dz / d;
-              if (d < o.target.r) {
+              if (d < o.target.r + orbR) {
                 game.hitEnemy(o.target, s.dmg, { fromX: o.x, fromZ: o.z, knockback: MG.px(100) });
                 this._popOrb(game, i, true);
                 continue;
               }
             }
-            o.x += dirX * GEIST_SPEED * dt;
-            o.z += dirZ * GEIST_SPEED * dt;
+            o.x += dirX * GEIST_SPEED * speedMult * dt;
+            o.z += dirZ * GEIST_SPEED * speedMult * dt;
             o.mesh.position.set(o.x, 0.6 + Math.sin(o.life * 9) * 0.08, o.z);
+            o.mesh.scale.setScalar(sizeMult);
             o.sparkleT -= dt;
             if (o.sparkleT <= 0) {
               game.addParticles(o.x, o.z, "#bfe8ff", 1);
@@ -1082,12 +927,14 @@
           }
         },
 
+        // Knotensack adds orbs to the level table's count per volley.
         _launch(game) {
           const s = GEIST_LEVELS[this.level];
+          const count = s.count + MG.weapons.getProjectileBonus();
           const p = game.player;
           const candidates = game.enemiesInRadius(p.x, p.z, GEIST_RANGE).filter((e) => !e.dead);
           if (candidates.length === 0) return; // hold fire with no target in range
-          for (let i = 0; i < s.count; i++) {
+          for (let i = 0; i < count; i++) {
             const target = candidates[Math.floor(Math.random() * candidates.length)];
             const mat = geistMatTemplate.clone();
             const mesh = new THREE.Mesh(geistGeo, mat);
@@ -1122,31 +969,6 @@
   // acquire/level-up. They live in the same MG.weapons.owned array and are
   // drawn in the HUD weapon row exactly like weapons.
   // ==========================================================================
-
-  // ---- Stiefel: +12% move speed per level (cumulative, off a captured base) ----
-  const STIEFEL_BONUS = [null, 0.12, 0.24, 0.36];
-  const stiefelDef = {
-    id: "stiefel",
-    name: "Stiefel",
-    icon: "👢",
-    desc: "+12% Lauftempo pro Stufe.",
-    maxLevel: STIEFEL_BONUS.length - 1,
-    type: "passive",
-    describeLevel(lvl) { return "Stiefel Lv" + lvl + ": +" + Math.round(STIEFEL_BONUS[lvl] * 100) + "% Lauftempo (gesamt)"; },
-    create(game) {
-      const inst = {
-        def: stiefelDef,
-        level: 1,
-        _base: game.player.stats.speed,
-        update() {},
-        _apply() { game.player.stats.speed = this._base * (1 + STIEFEL_BONUS[this.level]); },
-        levelUp() { this.level = Math.min(this.level + 1, stiefelDef.maxLevel); this._apply(); },
-      };
-      inst._apply();
-      return inst;
-    },
-  };
-  MG.weapons.registry.push(stiefelDef);
 
   // ---- Magnetring: +45% pickup radius per level (cumulative) ----
   const MAGNET_BONUS = [null, 0.45, 0.90, 1.35];
@@ -1224,6 +1046,68 @@
   };
   MG.weapons.registry.push(uhrDef);
 
+  // ---- Knotensack: +1 Projektil/Seite/Kette pro Stufe (weapon-focused) ----
+  // Purely derived via MG.weapons.getProjectileBonus() above — this
+  // instance itself carries no extra state beyond level.
+  const multiDef = {
+    id: "multi",
+    name: "Knotensack",
+    icon: "🧶",
+    desc: "+1 Projektil pro Stufe.",
+    maxLevel: 3,
+    type: "passive",
+    describeLevel(lvl) { return "Knotensack Lv" + lvl + ": +" + lvl + " Projektil" + (lvl > 1 ? "e" : "") + " (gesamt)"; },
+    create(game) {
+      return {
+        def: multiDef,
+        level: 1,
+        update() {},
+        levelUp() { this.level = Math.min(this.level + 1, multiDef.maxLevel); },
+      };
+    },
+  };
+  MG.weapons.registry.push(multiDef);
+
+  // ---- Riesenknoten: +18% Projektil-/Effektgröße pro Stufe (weapon-focused) ----
+  const sizeDef = {
+    id: "size",
+    name: "Riesenknoten",
+    icon: "🫧",
+    desc: "+18% Projektil-/Effektgröße pro Stufe.",
+    maxLevel: 3,
+    type: "passive",
+    describeLevel(lvl) { return "Riesenknoten Lv" + lvl + ": +" + Math.round(lvl * 18) + "% Größe (gesamt)"; },
+    create(game) {
+      return {
+        def: sizeDef,
+        level: 1,
+        update() {},
+        levelUp() { this.level = Math.min(this.level + 1, sizeDef.maxLevel); },
+      };
+    },
+  };
+  MG.weapons.registry.push(sizeDef);
+
+  // ---- Peitschenöl: +20% Projektiltempo pro Stufe (weapon-focused) ----
+  const oilDef = {
+    id: "oil",
+    name: "Peitschenöl",
+    icon: "🌪️",
+    desc: "+20% Projektiltempo pro Stufe.",
+    maxLevel: 3,
+    type: "passive",
+    describeLevel(lvl) { return "Peitschenöl Lv" + lvl + ": +" + Math.round(lvl * 20) + "% Projektiltempo (gesamt)"; },
+    create(game) {
+      return {
+        def: oilDef,
+        level: 1,
+        update() {},
+        levelUp() { this.level = Math.min(this.level + 1, oilDef.maxLevel); },
+      };
+    },
+  };
+  MG.weapons.registry.push(oilDef);
+
   // ==========================================================================
   // getLevelUpOptions(n) — level-up card pool.
   //
@@ -1237,7 +1121,7 @@
   //   (b) a "new weapon" card for every unowned weapon, but only while the
   //       player owns fewer than 4 weapons
   //   (c) a "new passive" card for every unowned passive, but only while
-  //       the player owns fewer than 3 passives
+  //       the player owns fewer than 4 passives
   // `n` distinct candidates are drawn uniformly at random from that pool
   // (never the same candidate twice in one draw). If the pool is smaller
   // than `n` (or empty — e.g. this trimmed-down build only ships one
@@ -1288,8 +1172,8 @@
       }
     }
 
-    // (c) new passives (cap: 3 owned passives)
-    if (ownedPassiveCount < 3) {
+    // (c) new passives (cap: 4 owned passives)
+    if (ownedPassiveCount < 4) {
       for (const def of MG.weapons.registry) {
         if (def.type !== "passive") continue;
         if (owned.some((w) => w.def.id === def.id)) continue;

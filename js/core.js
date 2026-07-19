@@ -628,12 +628,17 @@
   // (no real alpha channel). Chroma-key the black away once at load (same
   // routine as the 2D game) so it draws as a clean transparent cutout.
   // ---------------------------------------------------------------------
-  function loadCutoutTexture(src, onDone, onError) {
+  // loadCutoutCanvas is the shared primitive: it resolves the chroma-keyed
+  // <canvas> itself (plus the raw <img>, as a fallback source) so callers
+  // can either wrap it straight into a texture (loadCutoutTexture) or
+  // composite it together with another face (the doppel/riese amalgam
+  // texture below).
+  function loadCutoutCanvas(src, onDone, onError) {
     const raw = new Image();
     raw.onload = () => {
-      let tex;
+      let off = null;
       try {
-        const off = document.createElement("canvas");
+        off = document.createElement("canvas");
         off.width = raw.width;
         off.height = raw.height;
         const octx = off.getContext("2d");
@@ -647,19 +652,29 @@
           else if (maxc < 60) d[i + 3] = Math.round(((maxc - 28) / (60 - 28)) * 255);
         }
         octx.putImageData(imgData, 0, 0);
-        tex = new THREE.CanvasTexture(off);
       } catch (e) {
         // Cross-origin / file:// canvas read can fail in some browsers;
-        // fall back to the raw (un-keyed) image texture.
+        // signal "no usable canvas" so callers fall back to the raw image.
+        off = null;
+      }
+      onDone(off, raw);
+    };
+    if (onError) raw.onerror = onError;
+    raw.src = src;
+  }
+  function loadCutoutTexture(src, onDone, onError) {
+    loadCutoutCanvas(src, (off, raw) => {
+      let tex;
+      if (off) {
+        tex = new THREE.CanvasTexture(off);
+      } else {
         tex = new THREE.Texture(raw);
         tex.needsUpdate = true;
       }
       tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
       tex.needsUpdate = true;
       onDone(tex);
-    };
-    if (onError) raw.onerror = onError;
-    raw.src = src;
+    }, onError);
   }
 
   let baseEnemySpriteMat = new THREE.SpriteMaterial({ color: 0xcc9977, transparent: true }); // placeholder until image loads
@@ -667,12 +682,65 @@
   // missing, markus2SpriteMat stays null and the enemy types that want it
   // fall back to the first face plus their distinguishing tint color.
   let markus2SpriteMat = null;
-  loadCutoutTexture("assets/markus.png", (tex) => {
+  // Composite "amalgam" texture (id 'doppel'/'riese' enemies): built once,
+  // lazily, as soon as both face cutouts have resolved (markus2.png being
+  // present or not) — see buildAmalgamTexture below. Until it's ready,
+  // makeEnemySprite() falls back to the plain first face so an amalgam
+  // enemy can never render with a null material even in a pathological
+  // "amalgam type force-spawned before assets finished loading" case.
+  let amalgamSpriteMat = null;
+  let faceCanvas1 = null, faceCanvas2 = null, face2Settled = false;
+  function buildAmalgamTexture() {
+    if (amalgamSpriteMat || !faceCanvas1 || !face2Settled) return;
+    const SIZE = 160;
+    // ~35% overlap: two square face boxes of side FACE anchored at opposite
+    // corners overlap by (2*FACE - SIZE) in each axis; solving
+    // (2*FACE - SIZE) / FACE = 0.35 gives FACE ≈ SIZE / 1.65.
+    const FACE = SIZE / 1.65;
+    const cnv = document.createElement("canvas");
+    cnv.width = SIZE; cnv.height = SIZE;
+    const g = cnv.getContext("2d");
+    // Second head: markus2's face if it loaded, else a horizontally
+    // mirrored copy of the first face so the two heads still read as
+    // visually distinct.
+    let src2 = faceCanvas2;
+    if (!src2) {
+      const mirrored = document.createElement("canvas");
+      mirrored.width = faceCanvas1.width;
+      mirrored.height = faceCanvas1.height;
+      const mctx = mirrored.getContext("2d");
+      mctx.translate(mirrored.width, 0);
+      mctx.scale(-1, 1);
+      mctx.drawImage(faceCanvas1, 0, 0);
+      src2 = mirrored;
+    }
+    // face 1: bottom-left. face 2: top-right, overlapping the first.
+    g.drawImage(faceCanvas1, 0, SIZE - FACE, FACE, FACE);
+    g.drawImage(src2, SIZE - FACE, 0, FACE, FACE);
+    const tex = new THREE.CanvasTexture(cnv);
+    tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
+    tex.needsUpdate = true;
+    amalgamSpriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  }
+  loadCutoutCanvas("assets/markus.png", (off, raw) => {
+    faceCanvas1 = off;
+    const tex = off ? new THREE.CanvasTexture(off) : (() => { const t = new THREE.Texture(raw); t.needsUpdate = true; return t; })();
+    tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
+    tex.needsUpdate = true;
     baseEnemySpriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+    buildAmalgamTexture();
   });
-  loadCutoutTexture("assets/markus2.png", (tex) => {
-    markus2SpriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-  }, () => { markus2SpriteMat = null; });
+  loadCutoutCanvas("assets/markus2.png", (off, raw) => {
+    faceCanvas2 = off;
+    face2Settled = true;
+    if (off) {
+      const tex = new THREE.CanvasTexture(off);
+      tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
+      tex.needsUpdate = true;
+      markus2SpriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+    }
+    buildAmalgamTexture();
+  }, () => { markus2SpriteMat = null; face2Settled = true; buildAmalgamTexture(); });
 
   // ---------------------------------------------------------------------
   // Audio (WebAudio only, synthesized, no files) — unchanged from the 2D
@@ -927,6 +995,7 @@
     if (player.invuln > 0) return;
     for (const e of enemies) {
       if (e.dead) continue;
+      if (e.contactDmg <= 0) continue; // e.g. Goldener Markus (dmg 0): harmless, no invuln/hurt
       const d = Math.hypot(e.x - player.x, e.z - player.z);
       if (d < e.r + player.r) {
         player.hp -= e.contactDmg;
@@ -1028,9 +1097,12 @@
   // per player.invuln window regardless of how many enemies are touching
   // the player, so tuning stays governed by dmg / invuln, not enemy count.
   // `img2: true` types prefer the second face (assets/markus2.png) and fall
-  // back to the first face if that file is missing; `tint` (a hex color)
-  // is always applied so the type stays distinguishable either way.
-  // `splits` spawns that many `mini` enemies on death; `boss: true` types
+  // back to the first face if that file is missing; `amalgam: true` types
+  // instead use the composite two-face texture (amalgamSpriteMat, built
+  // once above) regardless of img2. `tint` (a hex color) is always applied
+  // so the type stays distinguishable either way.
+  // `splitsInto` (array of type ids) spawns one of each listed type on
+  // death, at the corpse, spread in random directions; `boss: true` types
   // are scheduled separately (never in the regular rotation), get a ground
   // ring marker, and drop a chest + gem jackpot.
   const ENEMY_TYPES = {
@@ -1038,26 +1110,52 @@
     flitzer: { hp: 10, speed: MG.px(130), r: MG.px(18), dmg: 5, xp: 1 },
     brocken: { hp: 90, speed: MG.px(40), r: MG.px(44), dmg: 13, xp: 5, tint: 0xdd5c4a },
     wueterich: { hp: 45, speed: MG.px(95), r: MG.px(30), dmg: 10, xp: 3, img2: true, tint: 0xffb46a },
-    teiler: { hp: 40, speed: MG.px(55), r: MG.px(38), dmg: 8, xp: 3, img2: true, tint: 0xa5e08a, splits: 2 },
+    teiler: { hp: 40, speed: MG.px(55), r: MG.px(38), dmg: 8, xp: 3, img2: true, tint: 0xa5e08a, splitsInto: ["mini", "mini"] },
     mini: { hp: 8, speed: MG.px(150), r: MG.px(14), dmg: 4, xp: 1, img2: true, tint: 0xa5e08a },
     boss: { hp: 650, speed: MG.px(50), r: MG.px(72), dmg: 25, xp: 25, img2: true, boss: true },
+    // Amalgam enemies (composite two-headed texture) — see buildAmalgamTexture.
+    doppel: { hp: 130, speed: MG.px(65), r: MG.px(48), dmg: 14, xp: 6, amalgam: true, splitsInto: ["normal", "wueterich"] },
+    riese: { hp: 350, speed: MG.px(35), r: MG.px(90), dmg: 30, xp: 12, amalgam: true, tint: 0x9a86b8, splitsInto: ["wueterich", "wueterich", "wueterich"] },
+    // Goldener Markus — rare harmless "fleeing" pickup enemy, not part of
+    // the regular pickEnemyType rotation (spawned on its own timer, see
+    // updateGoldenMarkus below).
+    gold: { hp: 60, speed: MG.px(160), r: MG.px(26), dmg: 0, xp: 0, tint: 0xffd700, flees: true, lifetime: 12 },
   };
   const SLOW_COLOR = new THREE.Color(0x8fd7ff);
   const FLASH_COLOR = new THREE.Color(0xffffff);
-  const MAX_ENEMIES = 250;
+  const MAX_ENEMIES = 350;
   const enemies = [];
   MG.enemies = enemies;
   let spawnTimer = 1;
 
-  // Boss schedule: first boss at 120s, then every 100s; each subsequent
+  // Boss schedule: first boss at 120s, then every 90s; each subsequent
   // boss gets +50% base HP on top of the normal time scaling.
-  const BOSS_FIRST_AT = 120, BOSS_INTERVAL = 100;
+  const BOSS_FIRST_AT = 120, BOSS_INTERVAL = 90;
   let nextBossAt = BOSS_FIRST_AT;
   let bossCount = 0;
 
-  function spawnInterval() {
-    return Math.max(0.25, 1.2 - gameTime * 0.004);
+  // Goldener Markus schedule: first eligible at 45s, then every 60-90s
+  // (randomized per gap), max 1 alive at once. Ignores MAX_ENEMIES like
+  // the boss schedule — it's a single harmless bonus enemy, never a
+  // meaningful load contributor.
+  const GOLD_FIRST_AT = 45;
+  let nextGoldAt = GOLD_FIRST_AT;
+  function updateGoldenMarkus() {
+    if (gameTime < nextGoldAt) return;
+    if (enemies.some((e) => !e.dead && e.type === "gold")) return;
+    spawnEnemy("gold");
+    nextGoldAt = gameTime + 60 + Math.random() * 30;
   }
+
+  function spawnInterval() {
+    return Math.max(0.15, 1.1 - gameTime * 0.005);
+  }
+  // Mix weights below are exact percentages per phase (comments give the
+  // n/f/b/w/t/d/r split so the cumulative thresholds stay auditable). The
+  // 'doppel'/'riese' ENEMY_TYPES entries are eligible from 4:30 / 6:00
+  // respectively (never spawn earlier than that anywhere in the game), but
+  // the weighted mix below — as specified — only actually starts rolling
+  // them from 5:30 / 7:00, i.e. strictly inside their eligible window.
   function pickEnemyType() {
     const t = gameTime;
     const r = Math.random();
@@ -1074,15 +1172,33 @@
       if (r < 0.85) return "brocken";
       return "wueterich";
     }
-    if (r < 0.35) return "normal";
-    if (r < 0.55) return "flitzer";
-    if (r < 0.72) return "brocken";
-    if (r < 0.88) return "wueterich";
-    return "teiler";
+    if (t < 330) { // n30/f20/b17/w16/teiler17
+      if (r < 0.30) return "normal";
+      if (r < 0.50) return "flitzer";
+      if (r < 0.67) return "brocken";
+      if (r < 0.83) return "wueterich";
+      return "teiler";
+    }
+    if (t < 420) { // n22/f16/b15/w15/t12/doppel20
+      if (r < 0.22) return "normal";
+      if (r < 0.38) return "flitzer";
+      if (r < 0.53) return "brocken";
+      if (r < 0.68) return "wueterich";
+      if (r < 0.80) return "teiler";
+      return "doppel";
+    }
+    // n15/f12/b13/w13/t12/d20/riese15
+    if (r < 0.15) return "normal";
+    if (r < 0.27) return "flitzer";
+    if (r < 0.40) return "brocken";
+    if (r < 0.53) return "wueterich";
+    if (r < 0.65) return "teiler";
+    if (r < 0.85) return "doppel";
+    return "riese";
   }
 
-  function makeEnemySprite(useImg2) {
-    const tmpl = useImg2 && markus2SpriteMat ? markus2SpriteMat : baseEnemySpriteMat;
+  function makeEnemySprite(t) {
+    const tmpl = t.amalgam && amalgamSpriteMat ? amalgamSpriteMat : (t.img2 && markus2SpriteMat ? markus2SpriteMat : baseEnemySpriteMat);
     const mat = tmpl.clone();
     const spr = new THREE.Sprite(mat);
     scene.add(spr);
@@ -1109,7 +1225,7 @@
     // Bosses skip the early ramp (they can't appear that early anyway) and
     // instead grow +50% per boss already beaten.
     const earlyMul = t.boss ? 1 : Math.min(1, 0.7 + 0.3 * (gameTime / 90));
-    let hpMul = earlyMul * (1 + 0.1 * (gameTime / 60));
+    let hpMul = earlyMul * (1 + 0.12 * (gameTime / 60));
     if (t.boss) hpMul *= 1 + 0.5 * bossCount;
     let ex = exOverride, ez = ezOverride;
     if (ex === null || ex === undefined) {
@@ -1121,7 +1237,7 @@
       ex = player.x + Math.cos(a) * ringR;
       ez = player.z + Math.sin(a) * ringR;
     }
-    const sprite = makeEnemySprite(t.img2);
+    const sprite = makeEnemySprite(t);
     const d = t.r * 2;
     sprite.scale.set(d, d, 1);
     sprite.position.set(ex, t.r, ez);
@@ -1135,6 +1251,7 @@
     }
     const baseColor = new THREE.Color(
       t.tint !== undefined ? t.tint :
+      (t.amalgam && !amalgamSpriteMat) ? 0xffb46a : // fallback-texture distinguisher (composite not built yet)
       (t.img2 && !markus2SpriteMat) ? 0x9ab0ff : // fallback-face distinguisher
       0xffffff
     );
@@ -1146,7 +1263,10 @@
       wobble: Math.random() * Math.PI * 2,
       hitFlash: 0, knockX: 0, knockZ: 0, dead: false,
       baseColor,
-      boss: !!t.boss, splits: t.splits || 0, ringMesh,
+      boss: !!t.boss, splitsInto: t.splitsInto || null, ringMesh,
+      // Goldener Markus (id 'gold'): flees instead of chasing, and
+      // despawns cleanly after `lifetime` seconds if never caught.
+      flees: !!t.flees, lifetime: t.lifetime || 0, age: 0,
       // Slow-effect hook (used by e.g. Frostpeitsche): while gameTime <
       // slowUntil, movement speed is multiplied by slowFactor.
       slowUntil: 0, slowFactor: 1,
@@ -1216,10 +1336,24 @@
     for (let i = enemies.length - 1; i >= 0; i--) {
       const e = enemies[i];
       if (e.dead) { disposeEnemy(e); enemies.splice(i, 1); continue; }
+      // Goldener Markus (and any future lifetime-limited enemy): despawn
+      // cleanly on expiry — a particle puff only, no hitEnemy/kill/gem.
+      if (e.lifetime > 0) {
+        e.age += dt;
+        if (e.age >= e.lifetime) {
+          addParticles(e.x, e.z, "#ffd54a", 20);
+          disposeEnemy(e);
+          enemies.splice(i, 1);
+          continue;
+        }
+      }
       const dx = player.x - e.x, dz = player.z - e.z;
       const d = Math.hypot(dx, dz) || 1;
       const slowMul = gameTime < e.slowUntil ? e.slowFactor : 1;
-      let vx = (dx / d) * e.speed * slowMul, vz = (dz / d) * e.speed * slowMul;
+      // `flees` types (Goldener Markus) run away from the player instead
+      // of chasing — same steering math, chase vector inverted.
+      const dirMul = e.flees ? -1 : 1;
+      let vx = dirMul * (dx / d) * e.speed * slowMul, vz = dirMul * (dz / d) * e.speed * slowMul;
       vx += e.knockX; vz += e.knockZ;
       const decay = Math.max(0, 1 - dt * 6);
       e.knockX *= decay; e.knockZ *= decay;
@@ -1269,14 +1403,29 @@
     spawnDamageNumber(enemy.x, enemy.r * 2 + 0.2, enemy.z, dmg);
     if (enemy.hp <= 0 && !enemy.dead) {
       enemy.dead = true;
+      killCount++;
+      // Goldener Markus: a dedicated, generous reward instead of the
+      // regular death path (its own xp/tint would otherwise drop a
+      // near-worthless 0-value gem).
+      if (enemy.type === "gold") {
+        addParticles(enemy.x, enemy.z, "#ffd54a", 40);
+        for (let g = 0; g < 8; g++) {
+          const ga = (g / 8) * Math.PI * 2;
+          spawnGem(enemy.x + Math.cos(ga) * 1.0, enemy.z + Math.sin(ga) * 1.0, 5); // value >=5 -> gold gem material
+        }
+        if (MG.food && typeof MG.food.spawnAt === "function") MG.food.spawnAt(enemy.x, enemy.z);
+        MG.sfx.levelup();
+        return;
+      }
       addParticles(enemy.x, enemy.z, "#ff8a8a", 16);
       spawnGem(enemy.x, enemy.z, enemy.xp);
-      killCount++;
-      // Teiler splits into minis where it fell.
-      if (enemy.splits > 0) {
-        for (let s = 0; s < enemy.splits; s++) {
+      // Splits into every listed child type (teiler -> 2x mini, doppel ->
+      // normal+wueterich, riese -> 3x wueterich, ...), placed spread around
+      // where it fell.
+      if (enemy.splitsInto && enemy.splitsInto.length) {
+        for (const childType of enemy.splitsInto) {
           const sa = Math.random() * Math.PI * 2;
-          spawnEnemyAt("mini", enemy.x + Math.cos(sa) * enemy.r * 0.8, enemy.z + Math.sin(sa) * enemy.r * 0.8);
+          spawnEnemyAt(childType, enemy.x + Math.cos(sa) * enemy.r * 0.8, enemy.z + Math.sin(sa) * enemy.r * 0.8);
         }
       }
       // Boss rewards: a chest right where it fell + a ring of gold gems.
@@ -1547,7 +1696,8 @@
   const hpBarFill = document.getElementById("hpBarFill");
   const hpLabel = document.getElementById("hpLabel");
   const killCounterEl = document.getElementById("killCounter");
-  const weaponRowEl = document.getElementById("weaponRow");
+  const slotBarEl = document.getElementById("slotBar");
+  const MAX_WEAPON_SLOTS = 4, MAX_PASSIVE_SLOTS = 4;
   const cardRowEl = document.getElementById("cardRow");
 
   let lastWeaponSig = "";
@@ -1566,15 +1716,32 @@
     const sig = MG.weapons.owned.map((w) => w.def.id + w.level).join(",");
     if (sig !== lastWeaponSig) {
       lastWeaponSig = sig;
-      weaponRowEl.innerHTML = "";
-      for (const w of MG.weapons.owned) {
-        const div = document.createElement("div");
-        div.className = "weapon-icon";
-        div.innerHTML = w.def.icon + '<span class="lvl">' + w.level + "</span>";
-        weaponRowEl.appendChild(div);
-      }
+      slotBarEl.innerHTML = "";
+      const weaponInsts = MG.weapons.owned.filter((w) => w.def.type !== "passive");
+      const passiveInsts = MG.weapons.owned.filter((w) => w.def.type === "passive");
+      appendSlotGroup(weaponInsts, MAX_WEAPON_SLOTS, "");
+      const gap = document.createElement("div");
+      gap.className = "slotGap";
+      slotBarEl.appendChild(gap);
+      appendSlotGroup(passiveInsts, MAX_PASSIVE_SLOTS, " passive-slot");
     }
     drawMinimap();
+  }
+  // Renders `count` boxes into #slotBar for one group (weapons or
+  // passives): filled slots (icon + level badge) for owned instances
+  // left-to-right, then dimmed/dashed empty slots for the remaining cap.
+  function appendSlotGroup(insts, count, extraClass) {
+    for (let i = 0; i < count; i++) {
+      const div = document.createElement("div");
+      const w = insts[i];
+      if (w) {
+        div.className = "weapon-icon" + extraClass;
+        div.innerHTML = w.def.icon + '<span class="lvl">' + w.level + "</span>";
+      } else {
+        div.className = "weapon-icon empty-slot" + extraClass;
+      }
+      slotBarEl.appendChild(div);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1615,9 +1782,9 @@
     ctx.strokeStyle = "rgba(255,255,255,0.10)";
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(half, half, (half - 10) * 0.5, 0, Math.PI * 2); ctx.stroke();
-    // horde: faint dots (regular), bosses drawn after as icons
+    // horde: faint dots (regular), bosses + Goldener Markus drawn after as icons
     for (const e of enemies) {
-      if (e.dead || e.boss) continue;
+      if (e.dead || e.boss || e.type === "gold") continue;
       const p = minimapPlot(ctx, half, e.x, e.z, false);
       if (!p) continue;
       ctx.fillStyle = "rgba(255,90,80,0.55)";
@@ -1654,6 +1821,13 @@
       if (e.dead || !e.boss) continue;
       const p = minimapPlot(ctx, half, e.x, e.z, true);
       if (p) { ctx.globalAlpha = p.rimmed ? 0.8 : 1; ctx.fillText("💀", p.x, p.y); }
+    }
+    // Goldener Markus — rim-clamped like bosses so it's always chaseable.
+    ctx.font = "13px sans-serif";
+    for (const e of enemies) {
+      if (e.dead || e.type !== "gold") continue;
+      const p = minimapPlot(ctx, half, e.x, e.z, true);
+      if (p) { ctx.globalAlpha = p.rimmed ? 0.8 : 1; ctx.fillText("🌟", p.x, p.y); }
     }
     ctx.globalAlpha = 1;
     // player arrow (facing direction) at center
@@ -1755,6 +1929,7 @@
     level = 1; xp = 0; xpToNext = xpNeeded(1); levelUpQueue = 0;
     killCount = 0; gameTime = 0; spawnTimer = 1;
     nextBossAt = BOSS_FIRST_AT; bossCount = 0;
+    nextGoldAt = GOLD_FIRST_AT;
     joystick.active = false;
     lastScatterCX = null; lastScatterCZ = null;
     viewRadiusDirty = true;
@@ -1842,6 +2017,7 @@
       bossCount++;
       nextBossAt += BOSS_INTERVAL;
     }
+    updateGoldenMarkus();
     updateEnemies(dt);
     updateGems(dt);
     // Chests / food (js/systems.js). Duck-typed hooks so core.js has zero

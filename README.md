@@ -5,7 +5,7 @@ Peitschenschwinger durch eine endlose, sonnige Low-Poly-Wiese und wehrst dich
 gegen eine ständig wachsende Horde von Markus-Köpfen – inklusive dicker
 Boss-Markusse. Bewegen, überleben, XP sammeln, aufleveln, Truhen plündern,
 Schreine für permanente Boni finden – bis die Horde dich irgendwann doch
-einholt. Die Minimap unten rechts zeigt dir immer den Weg.
+einholt. Die Minimap oben links zeigt dir immer den Weg.
 
 ## Spielen
 
@@ -30,15 +30,21 @@ python3 -m http.server 8000
 ## Ablauf
 
 - Feinde ("Markus"-Köpfe) tauchen am Rand des Sichtfelds auf und rücken auf
-  dich zu; je länger die Runde läuft, desto mehr und desto härter wird es.
-  Ab 2:30 kommen Wüteriche dazu (schnell und bissig), ab 4:00 Teiler, die
-  beim Tod in zwei flinke Mini-Markusse zerfallen.
-- Ab Minute 2 erscheint alle ~100 Sekunden ein **Boss-Markus** (💀 auf der
+  dich zu; je länger die Runde läuft, desto mehr und desto härter wird es
+  (Spawn-Tempo und HP-Wachstum ziehen mit der Zeit spürbar an, bis zu
+  350 gleichzeitigen Gegnern). Ab 2:30 kommen Wüteriche dazu (schnell und
+  bissig), ab 4:00 Teiler, die beim Tod in zwei flinke Mini-Markusse
+  zerfallen. Ab 4:30 taucht der **Doppelmarkus** auf – eine zweiköpfige
+  Verschmelzung, die beim Tod in einen normalen und einen Wüterich-Markus
+  zerfällt – und ab 6:00 der **Markus-Riese**, eine riesige, dunkel
+  eingefärbte Version davon, die gleich in drei Wüteriche zerfällt.
+- Ab Minute 2 erscheint alle ~90 Sekunden ein **Boss-Markus** (💀 auf der
   Minimap): groß, zäh (wird mit jedem Boss zäher), roter Bodenring. Zur
   Belohnung lässt er eine Truhe und einen XP-Kranz fallen.
-- Die **Minimap** (unten rechts) zeigt die Horde als Punkte sowie 💀 Bosse,
-  ⭐ Schreine, 🧰 Truhen und Essen; was außer Reichweite ist, klebt als
-  Richtungspfeil am Kartenrand.
+- Die **Minimap** (oben links, direkt unter der HP-Leiste) zeigt die Horde
+  als Punkte sowie 💀 Bosse, ⭐ Schreine, 🧰 Truhen, Essen und 🌟 den
+  Goldenen Markus; was außer Reichweite ist, klebt als Richtungspfeil am
+  Kartenrand.
 - Getötete Feinde lassen XP-Kristalle fallen. Ist die XP-Leiste voll, gibt's
   einen Level-Up mit 3 zufälligen Karten zur Auswahl.
 - Berührt dich ein Feind, verlierst du HP (kurze Unverwundbarkeit nach jedem
@@ -53,19 +59,25 @@ python3 -m http.server 8000
 | 🌀 | Kreiselpeitsche | Peitschenspitzen kreisen dauerhaft um dich und verletzen alles, was sie berühren. |
 | ⚡ | Blitzpeitsche | Schlägt in Abständen als Blitz beim nächsten Feind ein, kann auf weitere Gegner überspringen. |
 | 🔥 | Flammenpeitsche | Peitscht einen brennenden Kegel vor dir und hinterlässt Feuerflecken, die weiter Schaden machen. |
-| 🪃 | Schleuderpeitsche | Schleudert spinnende Peitschenknoten, die durch Gegner fliegen und zu dir zurückkehren. |
 | ❄️ | Frostpeitsche | Frost-Nova um dich herum: verletzt und verlangsamt alle Feinde in Reichweite. |
-| 🔨 | Markus-Hammer | Schmettert vor dir auf den Boden: Flächenschaden, harter Rückstoß und kurze Betäubung. |
 | 👻 | Geisterpeitsche | Beschwört zielsuchende Geister, die den nächsten Markus jagen und beim Aufprall zerplatzen. |
 
-## Passive Items (max. Stufe 3)
+Drei der Passiv-Items (siehe unten) wirken direkt auf diese Waffen: mehr
+Projektile/Seiten/Spitzen/Ketten/Orbs (bei allen außer der Frostpeitsche,
+die als einzelner Flächenpuls kein Projektil-Konzept hat), größere
+Hitboxen/Effekte (ausnahmslos bei allen sechs) und mehr Tempo bei allem,
+was tatsächlich fliegt oder rotiert (Geisterpeitsche, Kreiselpeitsche).
+
+## Passive Items (max. Stufe 3-4)
 
 | Icon | Name | Beschreibung |
 |---|---|---|
-| 👢 | Stiefel | +12 % Lauftempo pro Stufe. |
-| 🧲 | Magnetring | +45 % Aufsammelradius für XP-Kristalle pro Stufe. |
-| ❤️ | Markus-Herz | +25 max. HP pro Stufe, heilt beim Aufnehmen sofort 25 HP. |
-| ⏳ | Sanduhr | Alle Waffen-Cooldowns ×0,9 pro Stufe (stapelt sich). |
+| 🧲 | Magnetring | +45 % Aufsammelradius für XP-Kristalle pro Stufe (max. Stufe 3). |
+| ❤️ | Markus-Herz | +25 max. HP pro Stufe, heilt beim Aufnehmen sofort 25 HP (max. Stufe 3). |
+| ⏳ | Sanduhr | Alle Waffen-Cooldowns ×0,9 pro Stufe, stapelt sich (max. Stufe 3). |
+| 🧶 | Knotensack | +1 Projektil/Seite/Spitze/Kette/Orb pro Stufe (max. Stufe 3). |
+| 🫧 | Riesenknoten | +18 % Projektil-/Effektgröße pro Stufe: Hitboxen, Nova-Radius, Orb-Reichweite... (max. Stufe 3). |
+| 🌪️ | Peitschenöl | +20 % Projektiltempo pro Stufe: schnellere Geister-Orbs, schnellere Kreiselpeitsche (max. Stufe 3). |
 
 Reicht der Kartenpool nicht (z. B. wenn schon alles maximiert ist), springt
 als Notlösung die 🥨 **Brezel**-Karte ein: +30 HP, sofort.
@@ -112,9 +124,22 @@ angezogen – du musst drüberlaufen:
 | 🍺 | Maß | 8 s Berserker: alle Waffen-Cooldowns ×0,6 (stapelt mit der Sanduhr). |
 | 🧀 | Käsebrot | +10 max. HP für diese Runde und heilt 20 HP. |
 
+## Der Goldene Markus 🌟
+
+Ab Sekunde 45 taucht alle 60–90 Sekunden (nie mehr als einer gleichzeitig)
+ein scheuer, goldener Markus-Kopf auf – auf der Minimap als 🌟 markiert.
+Er ist völlig harmlos (macht keinen Schaden) und **flieht** vor dir, statt
+dich anzugreifen. Erwischst du ihn, bevor er nach 12 Sekunden von selbst
+wieder verschwindet, platzen 8 goldene XP-Kristalle plus garantiert ein
+Essens-Item aus ihm heraus – eine seltene, lohnende Verfolgungsjagd.
+
 ## Level- & Slot-Regeln
 
-- Maximal **4 Waffen** und **3 passive Items** gleichzeitig aktiv.
+- Maximal **4 Waffen** und **4 passive Items** gleichzeitig aktiv.
+- Die Slot-Leiste oben (mittig unter dem Timer) zeigt das direkt: 4
+  golden umrandete Waffen-Slots, eine kleine Lücke, dann 4 cyan umrandete
+  Passiv-Slots. Belegte Slots zeigen Icon + Stufen-Abzeichen, freie Slots
+  bleiben gestrichelt und abgedunkelt.
 - Jede Waffe/jedes Item lässt sich unabhängig aufleveln (Waffen bis Stufe 5,
   Passive bis Stufe 3); alle Werte pro Stufe stehen in eigenen Datentabellen
   in `js/weapons.js`.
@@ -139,10 +164,15 @@ angezogen – du musst drüberlaufen:
   Markus-Gegner sind chroma-gekeyte Billboard-Sprites; Deko (Felsen, Bäume,
   Gras, Bauwerke) per InstancedMesh.
 - Das zweite Gegner-Gesicht wird aus `assets/markus2.png` geladen; fehlt die
-  Datei, nutzen die neuen Gegnertypen automatisch das erste Gesicht mit
-  ihrer jeweiligen Erkennungsfarbe.
-- Minimap ist ein 2D-Canvas-Overlay, das jede Frame Spieler, Horde, Bosse,
-  Schreine, Truhen und Essen plottet (mit Rand-Clamping für ferne Ziele).
+  Datei, nutzen die betroffenen Gegnertypen automatisch das erste Gesicht mit
+  ihrer jeweiligen Erkennungsfarbe. Doppelmarkus/Markus-Riese nutzen
+  stattdessen eine einmalig zusammengesetzte "Amalgam"-Textur (beide
+  Gesichter überlappend auf einem Canvas), sobald beide Gesichts-Assets
+  geladen sind – fehlt `markus2.png`, wird das erste Gesicht gespiegelt als
+  zweiter Kopf verwendet.
+- Minimap (oben links, direkt unter der HP-Leiste) ist ein 2D-Canvas-Overlay,
+  das jede Frame Spieler, Horde, Bosse, Schreine, Truhen, Essen und den
+  Goldenen Markus plottet (mit Rand-Clamping für ferne Ziele).
 - Sound-Effekte werden per WebAudio zur Laufzeit synthetisiert (keine
   Audiodateien).
 - Debug-Hook für QA/Tests: `window.__game` (`gainXP(n)`, `player`, `enemies`,
